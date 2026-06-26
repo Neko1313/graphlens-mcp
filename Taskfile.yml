@@ -1,0 +1,65 @@
+version: "3"
+
+# Developer task runner for graphlens-mcp. Install go-task: https://taskfile.dev
+# Run `task` (or `task --list`) to see available tasks; `task check` runs everything.
+
+vars:
+  SRC: src
+  TESTS: tests
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  install:
+    desc: Sync the virtualenv with dev dependencies
+    cmds:
+      - uv sync --group dev
+
+  lint:
+    desc: Lint with ruff (the full ALL ruleset)
+    cmds:
+      - uv run ruff check {{.SRC}} {{.TESTS}}
+
+  format:
+    desc: Format with ruff
+    cmds:
+      - uv run ruff format {{.SRC}} {{.TESTS}}
+
+  format-check:
+    desc: Verify formatting without writing changes
+    cmds:
+      - uv run ruff format --check {{.SRC}} {{.TESTS}}
+
+  fix:
+    desc: Auto-fix lint issues and format
+    cmds:
+      - uv run ruff check --fix {{.SRC}} {{.TESTS}}
+      - uv run ruff format {{.SRC}} {{.TESTS}}
+
+  typecheck:
+    desc: Type-check with ty
+    cmds:
+      - uv run ty check {{.SRC}}
+
+  security:
+    desc: Security scan with bandit
+    cmds:
+      - uv run bandit -c pyproject.toml -r {{.SRC}}
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - uv run pytest
+
+  check:
+    desc: Run lint, format-check, typecheck, security and tests (CI gate)
+    cmds:
+      - task: lint
+      - task: format-check
+      - task: typecheck
+      - task: security
+      - task: test

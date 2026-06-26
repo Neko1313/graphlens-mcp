@@ -1,0 +1,110 @@
+[project]
+name = "graphlens-mcp"
+version = "0.1.0"
+description = "Semantic code graph MCP server for coding agents"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = { file = "LICENSE" }
+authors = [
+    { name = "Neko1313", email = "nikita.ribalchencko@yandex.ru" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "click>=8.4.2",
+    "fastmcp>=3.4.2",
+    "graphlens[go,python,rust,typescript,php]>=0.7.0",
+    "questionary>=2.0.1",
+    "tomlkit>=0.15.0",
+]
+
+[project.scripts]
+graphlens-mcp = "graphlens_mcp.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.3,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14",
+    "bandit>=1.8",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+# ----------------------------------------------------------------------
+# Tooling
+# ----------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # Resolved by the formatter / mutually exclusive rule pairs
+    "D203",    # one-blank-line-before-class (conflicts with D211)
+    "D213",    # multi-line-summary-second-line (conflicts with D212)
+    "COM812",  # trailing comma — handled by the formatter
+    "ISC001",  # implicit string concat — conflicts with the formatter
+    # Deliberate project conventions
+    "D100",    # missing docstring in public module
+    "D104",    # missing docstring in public package
+    "D107",    # missing docstring in __init__
+    "TD002",   # TODO author
+    "TD003",   # TODO issue link
+    "FIX002",  # line contains TODO
+    "CPY001",  # missing copyright notice
+    "EM101",   # raise with string literal — noise for a small CLI
+    "EM102",   # raise with f-string
+    "TRY003",  # long messages in raise — fine here
+    # Not applicable to this project (justified)
+    "FBT001",  # bool params are click flags / keyword-only options
+    "FBT002",  # bool defaults — same as above
+    "ASYNC240",# local filesystem stat/open is sub-ms; executor offload not worth it
+    "TC001",   # annotations already lazy via `from __future__ import annotations`
+    "TC002",   # same
+    "TC003",   # same
+    "PLR0913", # apply_patch / AgentSpec take many params by design
+    "BLE001",  # defensive `except Exception` around third-party adapters / file IO
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # asserts are the point of tests
+    "D",       # docstrings not required in tests
+    "ANN",     # type annotations not required in tests
+    "PLR2004", # magic values are fine in assertions
+    "SLF001",  # tests may touch private members
+    "ARG",     # fixtures/unused args are common
+]
+# NullResolver implements the SymbolResolver interface; its args are unused by design.
+"src/graphlens_mcp/indexer/resolvers.py" = ["ARG002"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+# B608: the only f-string SQL builds an IN(...) from a count of '?' placeholders or a
+# fixed table allowlist — never user data. Ruff's S608 (enabled via ALL) is the active
+# per-site guard that will flag any genuinely unsafe new query.
+skips = ["B608"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "unit: pure tests, no external processes",
+    "integration: real graphlens analyze / filesystem / CLI",
+    "store: SqliteStore behavior",
+    "workspace: indexing & freshness",
+    "agents: agent registry (de)registration",
+    "cli: command-line interface",
+    "tools: MCP tool layer",
+    "golden: batch == incremental invariant",
+    "paths: path normalization",
+]

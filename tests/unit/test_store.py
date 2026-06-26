@@ -1,0 +1,132 @@
+"""Unit tests for SqliteStore: persistence, FTS, graph CTEs and pruning."""
+
+from __future__ import annotations
+
+import pytest
+from graphlens import NodeKind, RelationKind
+
+from tests.conftest import graph_of, make_node, make_relation
+
+pytestmark = [pytest.mark.unit, pytest.mark.store]
+
+FILE = "/proj/m.py"
+META = ("hash", 1.0, 10, "ok", "python")
+
+
+async def _apply(store, nodes, relations, file_path=FILE):
+    await store.apply_patch(graph_of(nodes, relations), file_path, *META)
+
+
+async def test_apply_patch_persists_node_and_get_node_returns_it(store):
+    # Arrange
+    helper = make_node("pkg.helper", file_path=FILE)
+    # Act
+    await _apply(store, [helper], [])
+    # Assert
+    row = await store.get_node(helper.id)
+    assert row is not None
+    assert row["qualified_name"] == "pkg.helper"
+    assert row["file_path"] == FILE
+    assert await store.node_count() == 1
+
+
+async def test_search_symbols_finds_node_by_name(store):
+    # Arrange
+    await _apply(store, [make_node("pkg.create_order", file_path=FILE)], [])
+    # Act
+    hits = await store.search_symbols("create_order")
+    # Assert
+    assert [h["name"] for h in hits] == ["create_order"]
+
+
+async def test_get_callees_follows_calls_up_to_depth(store):
+    # Arrange: a -> b -> c
+    a, b, c = (make_node(n, file_path=FILE) for n in ("m.a", "m.b", "m.c"))
+    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, c, RelationKind.CALLS)]
+    await _apply(store, [a, b, c], rels)
+    # Act
+    deep = {n["name"] for n in await store.get_callees(a.id, max_depth=3)}
+    shallow = {n["name"] for n in await store.get_callees(a.id, max_depth=1)}
+    # Assert
+    assert deep == {"b", "c"}
+    assert shallow == {"b"}
+
+
+async def test_get_callers_is_the_mirror_of_callees(store):
+    # Arrange: a -> b -> c
+    a, b, c = (make_node(n, file_path=FILE) for n in ("m.a", "m.b", "m.c"))
+    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, c, RelationKind.CALLS)]
+    await _apply(store, [a, b, c], rels)
+    # Act
+    callers = {n["name"] for n in await store.get_callers(c.id, max_depth=3)}
+    # Assert
+    assert callers == {"a", "b"}
+
+
+async def test_call_graph_cte_is_cycle_safe(store):
+    # Arrange: a -> b -> a (a cycle that must not loop forever)
+    a, b = make_node("m.a", file_path=FILE), make_node("m.b", file_path=FILE)
+    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, a, RelationKind.CALLS)]
+    await _apply(store, [a, b], rels)
+    # Act
+    callees = {n["name"] for n in await store.get_callees(a.id, max_depth=10)}
+    # Assert: terminates and excludes the start node
+    assert callees == {"b"}
+
+
+async def test_reindexing_a_file_replaces_its_nodes(store):
+    # Arrange: first index has two functions
+    old = [make_node("m.gone", file_path=FILE), make_node("m.kept", file_path=FILE)]
+    await _apply(store, old, [])
+    # Act: re-index the same file with only one function
+    await _apply(store, [make_node("m.kept", file_path=FILE)], [])
+    # Assert: the dropped symbol is gone, no duplicates
+    names = {n["name"] for n in await store.get_nodes_in_file(FILE)}
+    assert names == {"kept"}
+
+
+async def test_delete_file_prunes_nodes_edges_and_search(store):
+    # Arrange
+    a, b = make_node("m.a", file_path=FILE), make_node("m.b", file_path=FILE)
+    await _apply(store, [a, b], [make_relation(a, b, RelationKind.CALLS)])
+    # Act
+    removed = await store.delete_file(FILE)
+    # Assert
+    assert removed is True
+    assert await store.node_count() == 0
+    assert await store.edge_count() == 0
+    assert await store.search_symbols("a") == []
+    assert await store.get_file_info(FILE) is None
+
+
+async def test_reindex_preserves_synthesized_cross_language_edges(store):
+    # Arrange: a file's function plus a synthesized COMMUNICATES_WITH edge from it
+    handler = make_node("svc.handler", file_path=FILE)
+    await _apply(store, [handler], [])
+    await store.apply_cross_language_edges(
+        [(handler.id, "other-service-node", RelationKind.COMMUNICATES_WITH.value)]
+    )
+    # Act: re-index the same file (incremental) — single-file analysis never re-emits it
+    await _apply(store, [handler], [])
+    # Assert: the cross-language edge survived the per-file delete
+    async with store._conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE kind = 'communicates_with'"
+    ) as cur:
+        surviving = (await cur.fetchone())[0]
+    assert surviving == 1
+
+
+async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
+    # Arrange: exposer (server) and consumer (client) meet at one HTTP boundary
+    server = make_node("svc.get_user", file_path="/svc.py")
+    client = make_node("web.fetch_user", file_path="/svc.py")
+    boundary = make_node("http:GET /users/{}", kind=NodeKind.BOUNDARY, file_path=None)
+    rels = [
+        make_relation(server, boundary, RelationKind.EXPOSES),
+        make_relation(client, boundary, RelationKind.CONSUMES),
+    ]
+    await _apply(store, [server, client, boundary], rels, file_path="/svc.py")
+    # Act
+    linked = {n["name"] for n in await store.get_cross_language_calls(server.id)}
+    # Assert
+    assert "fetch_user" in linked
