@@ -33,11 +33,12 @@ def _schema_fingerprint() -> str:
 
 
 async def _apply_schema(conn: aiosqlite.Connection) -> None:
+    # Use executescript rather than a naive split(";"): schema.sql contains a SQL
+    # comment with a literal ';' inside it, which a hand-rolled splitter would cut
+    # mid-statement and corrupt (it would drop every table after `edges`). SQLite's
+    # own multi-statement parser handles comments and statement boundaries correctly.
     schema = _SCHEMA_SQL.read_text()
-    for raw_stmt in schema.split(";"):
-        stmt = raw_stmt.strip()
-        if stmt:
-            await conn.execute(stmt)
+    await conn.executescript(schema)
 
 
 def _worst_status(*statuses: str) -> str:
