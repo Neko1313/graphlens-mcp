@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Annotated
 from fastmcp import FastMCP
 from pydantic import Field
 
-from graphlens_mcp.indexer.workspace import Workspace
+from graphlens_mcp.indexer.workspace import (
+    DEFAULT_WATCH_INTERVAL,
+    Workspace,
+)
 from graphlens_mcp.server.tools import (
     tool_find_references,
     tool_get_callees,
@@ -159,11 +162,24 @@ def create_mcp(store: SqliteStore, workspace: Workspace) -> FastMCP:
     return mcp
 
 
-def run_server(db_path: Path, project_root: Path) -> None:
-    """Entry point for `graphlens-mcp serve`."""
+def run_server(
+    db_path: Path,
+    project_root: Path,
+    *,
+    watch: bool = True,
+    watch_interval: float = DEFAULT_WATCH_INTERVAL,
+) -> None:
+    """
+    Entry point for `graphlens-mcp serve`.
+
+    When *watch* is true a background sweep re-indexes files edited on disk
+    even if no tool queries them, so the graph stays fresh on its own.
+    """
 
     async def _main() -> None:
         workspace = await Workspace.create(project_root, db_path)
+        if watch:
+            workspace.start_background_refresh(watch_interval)
         mcp = create_mcp(workspace.store, workspace)
         try:
             await mcp.run_stdio_async()

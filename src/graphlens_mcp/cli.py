@@ -14,7 +14,11 @@ from graphlens_mcp.agents import REGISTRY
 from graphlens_mcp.agents import configure as configure_agent
 from graphlens_mcp.agents import deregister as deregister_agent
 from graphlens_mcp.indexer.resolvers import doctor
-from graphlens_mcp.indexer.workspace import Workspace, default_db_path
+from graphlens_mcp.indexer.workspace import (
+    DEFAULT_WATCH_INTERVAL,
+    Workspace,
+    default_db_path,
+)
 from graphlens_mcp.server.mcp_server import run_server
 from graphlens_mcp.store.sqlite_store import SqliteStore
 
@@ -156,7 +160,26 @@ def init(
     help="Path to the graph database",
     type=click.Path(path_type=Path),
 )
-def serve(root: Path, db: Path | None) -> None:
+@click.option(
+    "--watch/--no-watch",
+    default=True,
+    show_default=True,
+    help="Re-index files edited on disk in the background, even if no "
+    "tool queries them.",
+)
+@click.option(
+    "--watch-interval",
+    default=DEFAULT_WATCH_INTERVAL,
+    show_default=True,
+    type=float,
+    help="Seconds between background freshness sweeps.",
+)
+def serve(
+    root: Path,
+    db: Path | None,
+    watch: bool,
+    watch_interval: float,
+) -> None:
     """
     Start the MCP server (stdio transport).
 
@@ -173,7 +196,7 @@ def serve(root: Path, db: Path | None) -> None:
         )
         sys.exit(1)
 
-    run_server(db_path, root)
+    run_server(db_path, root, watch=watch, watch_interval=watch_interval)
 
 
 @main.command()

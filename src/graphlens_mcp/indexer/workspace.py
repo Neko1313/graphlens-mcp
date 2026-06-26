@@ -7,6 +7,7 @@ Orchestrates indexing, freshness checks, and cross-language linking.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import logging
@@ -65,6 +66,9 @@ _DB_NAME = "graph.db"
 # otherwise blow up quadratically).
 _MAX_BOUNDARY_FANOUT = 2000
 
+# Default cadence of the background freshness sweep (seconds).
+DEFAULT_WATCH_INTERVAL = 15.0
+
 
 def default_db_path(project_root: Path) -> Path:
     """Return the default graph database location for *project_root*."""
@@ -87,6 +91,7 @@ class Workspace:
         # (Invariant: resolver off the request hot path.)
         self._adapters: dict[str, LanguageAdapter | None] = {}
         self._null_adapters: dict[str, LanguageAdapter | None] = {}
+        self._refresh_task: asyncio.Task[None] | None = None
 
     @classmethod
     async def create(cls, project_root: Path, db_path: Path) -> Workspace:
@@ -106,6 +111,65 @@ class Workspace:
             self._null_adapters[lang] = get_null_adapter(lang)
         return self._null_adapters[lang]
 
+    # ------------------------------------------------------------------
+    # Background freshness sweep
+    # ------------------------------------------------------------------
+
+    def start_background_refresh(
+        self, interval: float = DEFAULT_WATCH_INTERVAL
+    ) -> None:
+        """
+        Launch a background task that re-indexes changed files on a timer.
+
+        On-access freshness only re-indexes a file when a tool queries it; if
+        the agent never touches an edited file its graph stays stale. This
+        sweep keeps every *already-tracked* file current without a query, so
+        the graph self-heals. Idempotent — a second call is a no-op.
+        """
+        if self._refresh_task is not None:
+            return
+        self._refresh_task = asyncio.create_task(self._refresh_loop(interval))
+
+    async def stop_background_refresh(self) -> None:
+        """Cancel the background sweep task if it is running."""
+        task = self._refresh_task
+        self._refresh_task = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _refresh_loop(self, interval: float) -> None:
+        """Sweep tracked files every *interval* seconds until cancelled."""
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._sweep_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Background refresh sweep failed: %s", exc)
+
+    async def _sweep_once(self) -> int:
+        """
+        Re-index every tracked file whose bytes changed; prune deletions.
+
+        Reuses :meth:`ensure_fresh` (so the InFlightRegistry dedupes against
+        concurrent on-access indexing) and preserves each file's prior
+        semantic level. Returns the number of files visited.
+        """
+        files = await self.store.list_files()
+        for row in files:
+            want_semantic = row["status"] == "ok"
+            try:
+                await self.ensure_fresh(
+                    Path(row["path"]), semantic=want_semantic
+                )
+            except Exception as exc:
+                logger.debug("Sweep skip %s: %s", row["path"], exc)
+        return len(files)
+
     async def close(self) -> None:
         """
         Shut down pooled resolvers (e.g. ty LSP processes) and the store.
@@ -115,6 +179,7 @@ class Workspace:
         adapter exposes no public lifecycle hook. Idempotent — safe to call
         more than once.
         """
+        await self.stop_background_refresh()
         for adapter in self._adapters.values():
             if adapter is None:
                 continue

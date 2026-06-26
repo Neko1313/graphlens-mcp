@@ -99,6 +99,11 @@ changed, the file is re-indexed in two phases — an instant **skeleton** (struc
 demand for semantic queries, **full semantics** (resolved calls/types). Deleting a file on
 disk prunes its symbols from the graph on the next access.
 
+In addition, `serve` runs a **background sweep** (every `--watch-interval` seconds, default
+15) that re-indexes any already-tracked file edited on disk *even if no tool queries it*, so
+the graph self-heals when you edit files the agent hasn't asked about. Disable it with
+`graphlens-mcp serve --no-watch`.
+
 ## Known limitations
 
 - **Transitive freshness:** if file `B` changes, the semantics of a file `A` that imports it

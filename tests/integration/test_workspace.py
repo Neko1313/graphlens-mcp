@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,33 @@ async def test_dependency_change_degrades_importer(py_project: Path):
         assert await ws.ensure_fresh(b_py, semantic=True) == "degraded"
     finally:
         await ws.store.close()
+
+
+async def test_background_refresh_picks_up_edits_without_a_query(
+    py_project: Path,
+):
+    # The background sweep must re-index a file edited on disk even though no
+    # tool ever queries it (get_nodes_in_file is a plain read, not ensure_fresh).
+    ws = await _indexed(py_project)
+    try:
+        a_py = py_project / "pkg" / "a.py"
+        a_abs = str(a_py.resolve())
+        a_py.write_text(
+            a_py.read_text() + "\n\ndef bg_added():\n    return 1\n"
+        )
+
+        ws.start_background_refresh(interval=0.05)
+        names: set[str] = set()
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            names = {
+                n["name"] for n in await ws.store.get_nodes_in_file(a_abs)
+            }
+            if "bg_added" in names:
+                break
+        assert "bg_added" in names
+    finally:
+        await ws.close()
 
 
 async def test_close_is_idempotent(py_project: Path):

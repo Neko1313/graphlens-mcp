@@ -32,6 +32,12 @@ Before answering a query about a file, `Workspace.ensure_fresh` compares `mtime`
 re-index: phase 1 a **skeleton** (structure only, `NullResolver`), phase 2 **full
 semantics** on demand for semantic queries. Deleted on disk → the file's rows are pruned.
 
+`serve` also runs a **background sweep** (`Workspace.start_background_refresh`) that, every
+`--watch-interval` seconds, re-runs `ensure_fresh` over every tracked file so an edit is
+picked up even when no tool queries that file. It reuses the same `InFlightRegistry`, so a
+sweep and an on-access index of the same file never run twice. New-file discovery (indexing
+files not yet tracked) is left to `reindex`.
+
 ## Key invariants
 
 1. **Stable node ids** come from the engine (`make_node_id`) — never positional. This is
