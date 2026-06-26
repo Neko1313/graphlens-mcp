@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from graphlens import NodeKind
 
 from graphlens_mcp.indexer.workspace import _normalize_graph_paths
 from tests.conftest import graph_of, make_node
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 pytestmark = [pytest.mark.unit, pytest.mark.paths]
 
@@ -18,7 +21,9 @@ def test_relative_and_absolute_paths_collapse_to_one_absolute(tmp_path: Path):
     # (absolute path) for the SAME file, plus a fileless MODULE node.
     abs_a = str((tmp_path / "pkg" / "a.py").resolve())
     file_node = make_node("pkg.a", kind=NodeKind.FILE, file_path="pkg/a.py")
-    func_node = make_node("pkg.a.helper", kind=NodeKind.FUNCTION, file_path=abs_a)
+    func_node = make_node(
+        "pkg.a.helper", kind=NodeKind.FUNCTION, file_path=abs_a
+    )
     module_node = make_node("pkg", kind=NodeKind.MODULE, file_path=None)
     graph = graph_of([file_node, func_node, module_node], [])
 

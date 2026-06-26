@@ -3,21 +3,30 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from graphlens import (
     LanguageAdapter,
     ResolverStatus,
     adapter_registry,
 )
-from graphlens.contracts.resolver import Occurrence, Query, ResolvedRef, SymbolResolver
+from graphlens.contracts.resolver import (
+    Occurrence,
+    Query,
+    ResolvedRef,
+    SymbolResolver,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 INSTALL_HINTS: dict[str, str] = {
-    "python": "ty is bundled as a dependency — run `pip install graphlens-python`",
+    "python": (
+        "ty is bundled as a dependency — run `pip install graphlens-python`"
+    ),
     "go": "Install Go toolchain: https://go.dev/dl/",
     "rust": "Install Rust toolchain: https://rustup.rs/",
     "typescript": "Install Node.js: https://nodejs.org/",
@@ -28,27 +37,42 @@ INSTALL_HINTS: dict[str, str] = {
 class NullResolver(SymbolResolver):
     """Skeleton-only resolver — returns no results, status UNAVAILABLE."""
 
+    # Argument names must match SymbolResolver (override compatibility), but
+    # this skeleton resolves nothing, so each method marks its required-by-
+    # interface parameters intentionally-unused via ``del`` (keeps ARG002
+    # active without renaming).
+
     def prepare(self, project_root: Path, files: list[Path]) -> None:
         """No-op: the skeleton resolver has nothing to prepare."""
+        del project_root, files
 
-    def definition_at(self, file: Path, line: int, col: int) -> ResolvedRef | None:
+    def definition_at(
+        self, file: Path, line: int, col: int
+    ) -> ResolvedRef | None:
         """Return None — definitions are not resolved in skeleton mode."""
+        del file, line, col
         return None
 
     def resolve_all(self, queries: list[Query]) -> list[ResolvedRef | None]:
         """Return one None per query — nothing is resolved in skeleton mode."""
         return [None] * len(queries)
 
-    def infer_type_at(self, file: Path, line: int, col: int) -> ResolvedRef | None:
+    def infer_type_at(
+        self, file: Path, line: int, col: int
+    ) -> ResolvedRef | None:
         """Return None — types are not inferred in skeleton mode."""
+        del file, line, col
         return None
 
-    def references_to(self, file: Path, line: int, col: int) -> list[Occurrence]:
-        """Return an empty list — references are not resolved in skeleton mode."""
+    def references_to(
+        self, file: Path, line: int, col: int
+    ) -> list[Occurrence]:
+        """Return empty — references are not resolved in skeleton mode."""
+        del file, line, col
         return []
 
     def status(self) -> ResolverStatus:
-        """Always UNAVAILABLE — this resolver intentionally resolves nothing."""
+        """Report UNAVAILABLE — this resolver resolves nothing."""
         return ResolverStatus.UNAVAILABLE
 
 
@@ -63,7 +87,7 @@ def _adapter_cls(language: str) -> type[LanguageAdapter] | None:
 
 
 def get_adapter(language: str) -> LanguageAdapter | None:
-    """Return a fully-configured adapter for *language*, or None if unavailable."""
+    """Return a configured adapter for *language*, or None if missing."""
     cls = _adapter_cls(language)
     if cls is None:
         return None
@@ -75,21 +99,26 @@ def get_adapter(language: str) -> LanguageAdapter | None:
 
 
 def get_null_adapter(language: str) -> LanguageAdapter | None:
-    """Return an adapter configured with NullResolver (skeleton-only).
+    """
+    Return an adapter configured with NullResolver (skeleton-only).
 
     Returns None if the adapter does not accept a ``resolver=`` kwarg —
-    falling back to the real adapter would silently break the skeleton contract.
+    falling back to the real adapter would silently break the
+    skeleton contract.
     """
     cls = _adapter_cls(language)
     if cls is None:
         return None
     try:
-        # Dynamic probe: concrete adapters accept resolver=, the base type does not
-        # declare it. TypeError below handles adapters that genuinely reject it.
+        # Dynamic probe: concrete adapters accept resolver=, the base
+        # type does not declare it. TypeError below handles adapters
+        # that genuinely reject it.
         return cls(resolver=_NULL)  # ty: ignore[unknown-argument]
     except TypeError:
         logger.debug(
-            "Adapter %r does not accept resolver= kwarg; skeleton indexing skipped.", language
+            "Adapter %r does not accept resolver= kwarg; "
+            "skeleton indexing skipped.",
+            language,
         )
         return None
     except Exception:
@@ -118,13 +147,17 @@ def _get_resolver(adapter: LanguageAdapter) -> SymbolResolver | None:
 
 
 def doctor(project_root: Path) -> dict[str, dict[str, Any]]:
-    """Check each available language adapter and return a status report.
+    """
+    Check each available language adapter and return a status report.
 
     Returns::
 
         {
             "python": {"status": "ok", "hint": None},
-            "go":     {"status": "unavailable", "hint": "Install Go toolchain …"},
+            "go": {
+                "status": "unavailable",
+                "hint": "Install Go toolchain …",
+            },
         }
     """
     report: dict[str, dict[str, Any]] = {}
@@ -149,7 +182,9 @@ def doctor(project_root: Path) -> dict[str, dict[str, Any]]:
 
         hint: str | None = None
         if status != ResolverStatus.OK:
-            hint = INSTALL_HINTS.get(lang, f"Check graphlens-{lang} adapter docs")
+            hint = INSTALL_HINTS.get(
+                lang, f"Check graphlens-{lang} adapter docs"
+            )
 
         report[lang] = {"status": status.value, "hint": hint}
 

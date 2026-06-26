@@ -42,7 +42,10 @@ async def test_search_symbols_finds_node_by_name(store):
 async def test_get_callees_follows_calls_up_to_depth(store):
     # Arrange: a -> b -> c
     a, b, c = (make_node(n, file_path=FILE) for n in ("m.a", "m.b", "m.c"))
-    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, c, RelationKind.CALLS)]
+    rels = [
+        make_relation(a, b, RelationKind.CALLS),
+        make_relation(b, c, RelationKind.CALLS),
+    ]
     await _apply(store, [a, b, c], rels)
     # Act
     deep = {n["name"] for n in await store.get_callees(a.id, max_depth=3)}
@@ -55,7 +58,10 @@ async def test_get_callees_follows_calls_up_to_depth(store):
 async def test_get_callers_is_the_mirror_of_callees(store):
     # Arrange: a -> b -> c
     a, b, c = (make_node(n, file_path=FILE) for n in ("m.a", "m.b", "m.c"))
-    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, c, RelationKind.CALLS)]
+    rels = [
+        make_relation(a, b, RelationKind.CALLS),
+        make_relation(b, c, RelationKind.CALLS),
+    ]
     await _apply(store, [a, b, c], rels)
     # Act
     callers = {n["name"] for n in await store.get_callers(c.id, max_depth=3)}
@@ -66,7 +72,10 @@ async def test_get_callers_is_the_mirror_of_callees(store):
 async def test_call_graph_cte_is_cycle_safe(store):
     # Arrange: a -> b -> a (a cycle that must not loop forever)
     a, b = make_node("m.a", file_path=FILE), make_node("m.b", file_path=FILE)
-    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, a, RelationKind.CALLS)]
+    rels = [
+        make_relation(a, b, RelationKind.CALLS),
+        make_relation(b, a, RelationKind.CALLS),
+    ]
     await _apply(store, [a, b], rels)
     # Act
     callees = {n["name"] for n in await store.get_callees(a.id, max_depth=10)}
@@ -76,7 +85,10 @@ async def test_call_graph_cte_is_cycle_safe(store):
 
 async def test_reindexing_a_file_replaces_its_nodes(store):
     # Arrange: first index has two functions
-    old = [make_node("m.gone", file_path=FILE), make_node("m.kept", file_path=FILE)]
+    old = [
+        make_node("m.gone", file_path=FILE),
+        make_node("m.kept", file_path=FILE),
+    ]
     await _apply(store, old, [])
     # Act: re-index the same file with only one function
     await _apply(store, [make_node("m.kept", file_path=FILE)], [])
@@ -104,7 +116,13 @@ async def test_reindex_preserves_synthesized_cross_language_edges(store):
     handler = make_node("svc.handler", file_path=FILE)
     await _apply(store, [handler], [])
     await store.apply_cross_language_edges(
-        [(handler.id, "other-service-node", RelationKind.COMMUNICATES_WITH.value)]
+        [
+            (
+                handler.id,
+                "other-service-node",
+                RelationKind.COMMUNICATES_WITH.value,
+            )
+        ]
     )
     # Act: re-index the same file (incremental) — single-file analysis never re-emits it
     await _apply(store, [handler], [])
@@ -143,7 +161,8 @@ async def test_failed_write_rolls_back_and_leaves_no_partial_state(store):
                 "INSERT INTO nodes(id, kind, qualified_name, name) VALUES(?, ?, ?, ?)",
                 (boom.id, "function", boom.qualified_name, boom.name),
             )
-            raise RuntimeError("boom")
+            msg = "boom"
+            raise RuntimeError(msg)
 
     with pytest.raises(RuntimeError, match="boom"):
         await _failing_write()
@@ -154,7 +173,13 @@ async def test_failed_write_rolls_back_and_leaves_no_partial_state(store):
 async def test_worst_status_for_files_reports_least_complete(store):
     # Arrange: two files indexed at different graph qualities
     await store.apply_patch(
-        graph_of([make_node("a.x", file_path="/a.py")], []), "/a.py", "h", 1.0, 1, "ok", "python"
+        graph_of([make_node("a.x", file_path="/a.py")], []),
+        "/a.py",
+        "h",
+        1.0,
+        1,
+        "ok",
+        "python",
     )
     await store.apply_patch(
         graph_of([make_node("b.y", file_path="/b.py")], []),
@@ -166,7 +191,10 @@ async def test_worst_status_for_files_reports_least_complete(store):
         "python",
     )
     # Act / Assert: the aggregate is the least-complete of the two
-    assert await store.get_worst_status_for_files(["/a.py", "/b.py"]) == "skeleton"
+    assert (
+        await store.get_worst_status_for_files(["/a.py", "/b.py"])
+        == "skeleton"
+    )
     assert await store.get_worst_status_for_files(["/a.py"]) == "ok"
 
 
@@ -174,9 +202,14 @@ async def test_imported_paths_round_trip(store):
     # Arrange: an IMPORTS edge from b.py into a.py records a dep
     helper = make_node("a.helper", file_path="/a.py")
     importer = make_node("b.use", file_path="/b.py")
-    await store.apply_patch(graph_of([helper], []), "/a.py", "h", 1.0, 1, "ok", "python")
     await store.apply_patch(
-        graph_of([importer, helper], [make_relation(importer, helper, RelationKind.IMPORTS)]),
+        graph_of([helper], []), "/a.py", "h", 1.0, 1, "ok", "python"
+    )
+    await store.apply_patch(
+        graph_of(
+            [importer, helper],
+            [make_relation(importer, helper, RelationKind.IMPORTS)],
+        ),
         "/b.py",
         "h",
         1.0,
@@ -192,7 +225,9 @@ async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
     # Arrange: exposer (server) and consumer (client) meet at one HTTP boundary
     server = make_node("svc.get_user", file_path="/svc.py")
     client = make_node("web.fetch_user", file_path="/svc.py")
-    boundary = make_node("http:GET /users/{}", kind=NodeKind.BOUNDARY, file_path=None)
+    boundary = make_node(
+        "http:GET /users/{}", kind=NodeKind.BOUNDARY, file_path=None
+    )
     rels = [
         make_relation(server, boundary, RelationKind.EXPOSES),
         make_relation(client, boundary, RelationKind.CONSUMES),
@@ -202,6 +237,8 @@ async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
     await _apply(store, [server, client, boundary], rels, file_path="/svc.py")
     await store.apply_structural(graph_of([server, client, boundary], rels))
     # Act
-    linked = {n["name"] for n in await store.get_cross_language_calls(server.id)}
+    linked = {
+        n["name"] for n in await store.get_cross_language_calls(server.id)
+    }
     # Assert
     assert "fetch_user" in linked

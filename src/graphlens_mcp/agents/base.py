@@ -1,10 +1,11 @@
-"""Agent registry primitives: a data-driven spec per MCP client + (de)register.
+"""
+Agent registry primitives: a data-driven spec per MCP client + (de)register.
 
-Each coding agent stores MCP server config differently — Claude Code and Cursor
-use a ``mcpServers`` map, VS Code uses ``servers`` with a ``type`` field, configs
-live at different paths and some are global. :class:`AgentSpec` captures those
-differences so adding an agent is data, not code, and ``init``/``remove`` operate
-on any spec uniformly.
+Each coding agent stores MCP server config differently — Claude Code and
+Cursor use a ``mcpServers`` map, VS Code uses ``servers`` with a ``type``
+field, configs live at different paths and some are global.
+:class:`AgentSpec` captures those differences so adding an agent is data,
+not code, and ``init``/``remove`` operate on any spec uniformly.
 """
 
 from __future__ import annotations
@@ -12,12 +13,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import tomlkit
 import tomlkit.exceptions
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Key under which we register our server in each agent's config.
 SERVER_KEY = "graphlens"
@@ -25,12 +29,14 @@ SERVER_KEY = "graphlens"
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """Declarative description of how to (de)register graphlens in one agent."""
+    """Declarative description of how to (de)register graphlens here."""
 
     name: str  # registry key / --agent value
     label: str  # human display name
     scope: str  # 'project' or 'global'
-    servers_key: str  # top-level config key: 'mcpServers' | 'servers' | 'mcp_servers'
+    servers_key: (
+        str  # top-level config key: 'mcpServers' | 'servers' | 'mcp_servers'
+    )
     stdio_type: bool  # emit {"type": "stdio", ...} in the entry (VS Code)
     path_fn: Callable[[Path], Path]  # config file location for a project root
     detect_fn: Callable[[Path], bool]  # is this agent plausibly used here?
@@ -42,7 +48,7 @@ class AgentSpec:
         return self.path_fn(project_root.resolve())
 
     def detect(self, project_root: Path) -> bool:
-        """Return True if this agent looks like it is used for *project_root*."""
+        """Return True if this agent looks used for *project_root*."""
         try:
             return bool(self.detect_fn(project_root.resolve()))
         except OSError:
@@ -62,7 +68,7 @@ def _server_entry(spec: AgentSpec, project_root: Path, db_path: Path) -> dict:
 
 
 def configure(spec: AgentSpec, project_root: Path, db_path: Path) -> Path:
-    """Write (or update) the graphlens MCP entry in *spec*'s config. Idempotent."""
+    """Write/update the graphlens MCP entry in *spec*'s config. Idempotent."""
     project_root = project_root.resolve()
     path = spec.config_path(project_root)
     entry = _server_entry(spec, project_root, db_path.resolve())
@@ -83,7 +89,7 @@ def configure(spec: AgentSpec, project_root: Path, db_path: Path) -> Path:
 
 
 def deregister(spec: AgentSpec, project_root: Path) -> bool:
-    """Remove the graphlens entry from *spec*'s config. Returns True if removed."""
+    """Remove graphlens entry from *spec*'s config. True if removed."""
     path = spec.config_path(project_root.resolve())
     if not path.exists():
         return False
@@ -131,7 +137,9 @@ def _load_toml(path: Path) -> tomlkit.TOMLDocument:
 
 def _atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".graphlens-", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(
+        dir=path.parent, prefix=".graphlens-", suffix=".tmp"
+    )
     tmp_path = Path(tmp)
     try:
         with os.fdopen(fd, "w") as f:

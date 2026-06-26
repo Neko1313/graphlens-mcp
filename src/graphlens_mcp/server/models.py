@@ -1,8 +1,10 @@
-"""Pydantic models for the MCP tool boundary.
+"""
+Pydantic models for the MCP tool boundary.
 
-Typed request/response models give the agent a stable, self-describing contract
-(FastMCP derives the tool output schema from these) and a single response envelope
-so every tool reports graph quality (``resolver_status``) and truncation the same way.
+Typed request/response models give the agent a stable, self-describing
+contract (FastMCP derives the tool output schema from these) and a single
+response envelope so every tool reports graph quality (``resolver_status``)
+and truncation the same way.
 """
 
 from __future__ import annotations
@@ -63,8 +65,10 @@ class FileStructureResult(BaseModel):
     error: str | None = None
 
 
-def to_refs(rows: list[dict[str, Any]], limit: int) -> tuple[list[NodeRef], bool]:
-    """Convert store rows to NodeRefs, capped at *limit*. Returns (refs, truncated)."""
+def to_refs(
+    rows: list[dict[str, Any]], limit: int
+) -> tuple[list[NodeRef], bool]:
+    """Convert rows to NodeRefs, capped at *limit*. Returns (refs, trunc)."""
     capped = min(limit, MAX_RESULTS)
     truncated = len(rows) > capped
     return [NodeRef.from_row(r) for r in rows[:capped]], truncated

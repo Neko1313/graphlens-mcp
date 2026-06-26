@@ -8,7 +8,11 @@ import pytest
 from graphlens import GraphLens, Node, NodeKind, make_node_id
 
 from graphlens_mcp.indexer.workspace import Workspace
-from graphlens_mcp.server.tools import _aggregate_status, _first_meta, tool_get_node_info
+from graphlens_mcp.server.tools import (
+    _aggregate_status,
+    _first_meta,
+    tool_get_node_info,
+)
 from tests.conftest import graph_of, make_node
 
 pytestmark = [pytest.mark.unit, pytest.mark.tools]
@@ -17,7 +21,13 @@ pytestmark = [pytest.mark.unit, pytest.mark.tools]
 async def test_aggregate_status_takes_worst_across_returned_files(store):
     # Arrange: one file indexed 'ok', another 'skeleton'
     await store.apply_patch(
-        graph_of([make_node("a.x", file_path="/a.py")], []), "/a.py", "h", 1.0, 1, "ok", "python"
+        graph_of([make_node("a.x", file_path="/a.py")], []),
+        "/a.py",
+        "h",
+        1.0,
+        1,
+        "ok",
+        "python",
     )
     await store.apply_patch(
         graph_of([make_node("b.y", file_path="/b.py")], []),
@@ -31,11 +41,15 @@ async def test_aggregate_status_takes_worst_across_returned_files(store):
     rows = [{"file_path": "/a.py"}, {"file_path": "/b.py"}]
     # Act / Assert: even with an 'ok' base, a skeleton file in the result degrades it
     assert await _aggregate_status(store, "ok", rows) == "skeleton"
-    assert await _aggregate_status(store, "ok", [{"file_path": "/a.py"}]) == "ok"
+    assert (
+        await _aggregate_status(store, "ok", [{"file_path": "/a.py"}]) == "ok"
+    )
 
 
 def test_first_meta_picks_first_present_string_key():
-    meta = json.dumps({"docstring": "Adds one.", "signature": "(x: int) -> int"})
+    meta = json.dumps(
+        {"docstring": "Adds one.", "signature": "(x: int) -> int"}
+    )
     assert _first_meta(meta, ("signature", "sig")) == "(x: int) -> int"
     assert _first_meta(meta, ("doc", "docstring")) == "Adds one."
     assert _first_meta(meta, ("missing",)) is None

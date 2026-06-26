@@ -37,14 +37,20 @@ async def test_callers_tool_reports_impact_across_files(py_project: Path):
     ws = await _workspace(py_project)
     try:
         hits = await tool_search_symbols(ws.store, "helper")
-        helper = next(n for n in hits.nodes if n.name == "helper" and n.kind == "function")
+        helper = next(
+            n
+            for n in hits.nodes
+            if n.name == "helper" and n.kind == "function"
+        )
         result = await tool_get_callers(ws.store, ws, helper.id)
         assert {n.name for n in result.nodes} >= {"main", "use"}
     finally:
         await ws.close()
 
 
-async def test_file_structure_accepts_a_project_relative_path(py_project: Path, monkeypatch):
+async def test_file_structure_accepts_a_project_relative_path(
+    py_project: Path, monkeypatch
+):
     # The agent passes a relative path; it must resolve against the project root,
     # not the server's cwd.
     ws = await _workspace(py_project)

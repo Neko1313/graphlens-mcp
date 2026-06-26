@@ -15,12 +15,12 @@ tasks:
     silent: true
 
   install:
-    desc: Sync the virtualenv with dev dependencies
+    desc: Sync the virtualenv with all dependency groups
     cmds:
-      - uv sync --group dev
+      - uv sync --all-groups
 
   lint:
-    desc: Lint with ruff (the full ALL ruleset)
+    desc: Lint with ruff (curated ruleset in ruff.toml)
     cmds:
       - uv run ruff check {{.SRC}} {{.TESTS}}
 

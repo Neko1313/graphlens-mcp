@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from graphlens_mcp.server.models import MAX_RESULTS, GraphResult, NodeRef, to_refs
+from graphlens_mcp.server.models import (
+    MAX_RESULTS,
+    GraphResult,
+    NodeRef,
+    to_refs,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.tools]
 

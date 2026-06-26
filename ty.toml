@@ -1,0 +1,6 @@
+# Type-check config aligned with the graphlens engine (Neko1313/graphlens ty.toml).
+[environment]
+root = ["."]
+
+[src]
+include = ["src"]

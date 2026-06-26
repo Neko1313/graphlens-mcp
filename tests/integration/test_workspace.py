@@ -19,7 +19,9 @@ async def _indexed(root: Path) -> Workspace:
 
 async def _func_id(ws: Workspace, name: str) -> str:
     hits = await ws.store.search_symbols(name)
-    return next(h["id"] for h in hits if h["name"] == name and h["kind"] == "function")
+    return next(
+        h["id"] for h in hits if h["name"] == name and h["kind"] == "function"
+    )
 
 
 async def test_full_index_records_absolute_paths_only(py_project: Path):
@@ -54,7 +56,9 @@ async def test_deleted_file_is_pruned_on_access(py_project: Path):
         await ws.ensure_fresh(b_py)
 
         assert await ws.store.get_nodes_in_file(b_abs) == []
-        assert all(h["name"] != "use" for h in await ws.store.search_symbols("use"))
+        assert all(
+            h["name"] != "use" for h in await ws.store.search_symbols("use")
+        )
     finally:
         await ws.store.close()
 
@@ -69,7 +73,9 @@ async def test_edit_is_picked_up_on_next_query(py_project: Path):
         before = {n["name"] for n in await ws.store.get_nodes_in_file(a_abs)}
         assert "freshly_added" not in before
 
-        a_py.write_text(a_py.read_text() + "\n\ndef freshly_added():\n    return 1\n")
+        a_py.write_text(
+            a_py.read_text() + "\n\ndef freshly_added():\n    return 1\n"
+        )
         await ws.ensure_fresh(a_py, semantic=True)
 
         after = {n["name"] for n in await ws.store.get_nodes_in_file(a_abs)}

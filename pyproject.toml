@@ -25,67 +25,23 @@ requires = ["uv_build>=0.11.3,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = [
-    "ruff>=0.14",
-    "bandit>=1.8",
+# Mirrors the graphlens engine: a lint group and a test group, synced together via
+# `uv sync --all-groups`. Ruff/ty config lives in ruff.toml / ty.toml (engine parity).
+lint = [
+    "bandit>=1.9.3",
+    "ruff>=0.15.0",
+    "ty>=0.0.15",
+]
+test = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
     "pytest-timeout>=2.3",
 ]
 
 # ----------------------------------------------------------------------
 # Tooling
 # ----------------------------------------------------------------------
-
-[tool.ruff]
-line-length = 100
-target-version = "py313"
-src = ["src", "tests"]
-
-[tool.ruff.lint]
-select = ["ALL"]
-ignore = [
-    # Resolved by the formatter / mutually exclusive rule pairs
-    "D203",    # one-blank-line-before-class (conflicts with D211)
-    "D213",    # multi-line-summary-second-line (conflicts with D212)
-    "COM812",  # trailing comma — handled by the formatter
-    "ISC001",  # implicit string concat — conflicts with the formatter
-    # Deliberate project conventions
-    "D100",    # missing docstring in public module
-    "D104",    # missing docstring in public package
-    "D107",    # missing docstring in __init__
-    "TD002",   # TODO author
-    "TD003",   # TODO issue link
-    "FIX002",  # line contains TODO
-    "CPY001",  # missing copyright notice
-    "EM101",   # raise with string literal — noise for a small CLI
-    "EM102",   # raise with f-string
-    "TRY003",  # long messages in raise — fine here
-    # Not applicable to this project (justified)
-    "FBT001",  # bool params are click flags / keyword-only options
-    "FBT002",  # bool defaults — same as above
-    "ASYNC240",# local filesystem stat/open is sub-ms; executor offload not worth it
-    "TC001",   # annotations already lazy via `from __future__ import annotations`
-    "TC002",   # same
-    "TC003",   # same
-    "PLR0913", # apply_patch / AgentSpec take many params by design
-    "BLE001",  # defensive `except Exception` around third-party adapters / file IO
-]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**" = [
-    "S101",    # asserts are the point of tests
-    "D",       # docstrings not required in tests
-    "ANN",     # type annotations not required in tests
-    "PLR2004", # magic values are fine in assertions
-    "SLF001",  # tests may touch private members
-    "ARG",     # fixtures/unused args are common
-]
-# NullResolver implements the SymbolResolver interface; its args are unused by design.
-"src/graphlens_mcp/indexer/resolvers.py" = ["ARG002"]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
 
 [tool.bandit]
 exclude_dirs = ["tests"]
