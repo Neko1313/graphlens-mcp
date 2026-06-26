@@ -59,6 +59,50 @@ async def test_deleted_file_is_pruned_on_access(py_project: Path):
         await ws.store.close()
 
 
+async def test_edit_is_picked_up_on_next_query(py_project: Path):
+    # On-access freshness: an edit (by a human or agent) is reflected on the next query,
+    # with no file watcher — the changed file is re-indexed when it is next touched.
+    ws = await _indexed(py_project)
+    try:
+        a_py = py_project / "pkg" / "a.py"
+        a_abs = str(a_py.resolve())
+        before = {n["name"] for n in await ws.store.get_nodes_in_file(a_abs)}
+        assert "freshly_added" not in before
+
+        a_py.write_text(a_py.read_text() + "\n\ndef freshly_added():\n    return 1\n")
+        await ws.ensure_fresh(a_py, semantic=True)
+
+        after = {n["name"] for n in await ws.store.get_nodes_in_file(a_abs)}
+        assert "freshly_added" in after
+    finally:
+        await ws.store.close()
+
+
+async def test_dependency_change_degrades_importer(py_project: Path):
+    # Transitive freshness: b.py imports a.py. Editing a.py and then querying b.py
+    # (semantic) must report 'degraded', not a false 'ok' — single-file analysis cannot
+    # re-resolve b's cross-file calls into a's new definition until a full reindex.
+    ws = await _indexed(py_project)
+    try:
+        a_py = py_project / "pkg" / "a.py"
+        b_py = py_project / "pkg" / "b.py"
+        # b is fully resolved before the dependency changes
+        assert await ws.ensure_fresh(b_py, semantic=True) == "ok"
+
+        a_py.write_text(a_py.read_text().replace("x + 1", "x + 999"))
+        # b itself is unchanged on disk, but its dependency a.py changed
+        assert await ws.ensure_fresh(b_py, semantic=True) == "degraded"
+    finally:
+        await ws.store.close()
+
+
+async def test_close_is_idempotent(py_project: Path):
+    ws = await _indexed(py_project)
+    await ws.close()
+    # A second close must not raise (best-effort resolver shutdown + already-closed store)
+    await ws.close()
+
+
 async def test_indexing_from_a_foreign_cwd_keeps_paths_absolute(
     py_project: Path, tmp_path, monkeypatch
 ):

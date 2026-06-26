@@ -47,6 +47,8 @@ class NodeInfoResult(BaseModel):
 
     node: NodeRef | None = None
     source: str | None = None
+    signature: str | None = None
+    docstring: str | None = None
     resolver_status: str = "ok"
     error: str | None = None
 

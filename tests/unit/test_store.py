@@ -116,6 +116,78 @@ async def test_reindex_preserves_synthesized_cross_language_edges(store):
     assert surviving == 1
 
 
+async def test_apply_patch_persists_only_file_owned_nodes(store):
+    # Arrange: a graph for FILE that also carries a foreign edge-target node (as
+    # subgraph_for_file / single-file analyze surface). Only the owned node is ours.
+    owned = make_node("m.local", file_path=FILE)
+    foreign = make_node("other.remote", file_path="/proj/other.py")
+    rels = [make_relation(owned, foreign, RelationKind.CALLS)]
+    # Act: patch FILE with a graph containing both nodes
+    await _apply(store, [owned, foreign], rels)
+    # Assert: the foreign node is NOT written by this file's patch (its own file owns it)
+    assert await store.get_node(owned.id) is not None
+    assert await store.get_node(foreign.id) is None
+    # the edge is still recorded; its dangling target is filtered at read time
+    assert await store.edge_count() == 1
+
+
+async def test_failed_write_rolls_back_and_leaves_no_partial_state(store):
+    # Arrange: a clean store
+    assert await store.node_count() == 0
+    # Act: a write that inserts a node then raises before commit must roll back
+    boom = make_node("m.boom", file_path=FILE)
+
+    async def _failing_write() -> None:
+        async with store._writing():
+            await store._conn.execute(
+                "INSERT INTO nodes(id, kind, qualified_name, name) VALUES(?, ?, ?, ?)",
+                (boom.id, "function", boom.qualified_name, boom.name),
+            )
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _failing_write()
+    # Assert: nothing persisted — the partial insert was rolled back, not committed
+    assert await store.node_count() == 0
+
+
+async def test_worst_status_for_files_reports_least_complete(store):
+    # Arrange: two files indexed at different graph qualities
+    await store.apply_patch(
+        graph_of([make_node("a.x", file_path="/a.py")], []), "/a.py", "h", 1.0, 1, "ok", "python"
+    )
+    await store.apply_patch(
+        graph_of([make_node("b.y", file_path="/b.py")], []),
+        "/b.py",
+        "h",
+        1.0,
+        1,
+        "skeleton",
+        "python",
+    )
+    # Act / Assert: the aggregate is the least-complete of the two
+    assert await store.get_worst_status_for_files(["/a.py", "/b.py"]) == "skeleton"
+    assert await store.get_worst_status_for_files(["/a.py"]) == "ok"
+
+
+async def test_imported_paths_round_trip(store):
+    # Arrange: an IMPORTS edge from b.py into a.py records a dep
+    helper = make_node("a.helper", file_path="/a.py")
+    importer = make_node("b.use", file_path="/b.py")
+    await store.apply_patch(graph_of([helper], []), "/a.py", "h", 1.0, 1, "ok", "python")
+    await store.apply_patch(
+        graph_of([importer, helper], [make_relation(importer, helper, RelationKind.IMPORTS)]),
+        "/b.py",
+        "h",
+        1.0,
+        1,
+        "ok",
+        "python",
+    )
+    # Act / Assert
+    assert await store.get_imported_paths("/b.py") == ["/a.py"]
+
+
 async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
     # Arrange: exposer (server) and consumer (client) meet at one HTTP boundary
     server = make_node("svc.get_user", file_path="/svc.py")
@@ -125,7 +197,10 @@ async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
         make_relation(server, boundary, RelationKind.EXPOSES),
         make_relation(client, boundary, RelationKind.CONSUMES),
     ]
+    # File-owned nodes + their EXPOSES/CONSUMES edges go through apply_patch; the
+    # fileless boundary node is persisted by apply_structural (as the full index does).
     await _apply(store, [server, client, boundary], rels, file_path="/svc.py")
+    await store.apply_structural(graph_of([server, client, boundary], rels))
     # Act
     linked = {n["name"] for n in await store.get_cross_language_calls(server.id)}
     # Assert

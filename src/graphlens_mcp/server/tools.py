@@ -21,7 +21,11 @@ from graphlens_mcp.server.models import (
     NodeRef,
     to_refs,
 )
-from graphlens_mcp.store.sqlite_store import SqliteStore
+from graphlens_mcp.store.sqlite_store import SqliteStore, worst_status
+
+# Metadata keys graphlens adapters commonly attach to a definition node.
+_SIGNATURE_KEYS = ("signature", "sig")
+_DOCSTRING_KEYS = ("docstring", "doc", "documentation")
 
 
 def _read_span(path: str | None, span_json: str | None) -> str | None:
@@ -40,6 +44,23 @@ def _read_span(path: str | None, span_json: str | None) -> str | None:
         return None
 
 
+def _first_meta(metadata_json: str | None, keys: tuple[str, ...]) -> str | None:
+    """Return the first present, string-coercible value among *keys* in node metadata."""
+    if not metadata_json:
+        return None
+    try:
+        meta = json.loads(metadata_json)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    for key in keys:
+        value = meta.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _resolve_in_project(workspace: Workspace, path: str) -> Path:
     """Resolve *path* against the project root when relative, not the server cwd."""
     p = Path(path)
@@ -55,6 +76,19 @@ async def _fresh_status(workspace: Workspace, node: dict, *, semantic: bool) -> 
     return await workspace.ensure_fresh(Path(file_path), semantic=semantic)
 
 
+async def _aggregate_status(store: SqliteStore, base_status: str, rows: list[dict]) -> str:
+    """Fold *base_status* together with the stored status of every returned node's file.
+
+    The freshness check only refreshes the queried node's own file, so a walk can
+    return callers/callees from files that were last indexed at ``skeleton`` quality.
+    Reporting only the queried node's status would let the agent treat such a partial
+    answer as complete; instead we surface the worst status across all returned files.
+    """
+    paths = sorted({r["file_path"] for r in rows if r.get("file_path")})
+    stored = await store.get_worst_status_for_files(paths) if paths else "ok"
+    return worst_status(base_status, stored)
+
+
 async def tool_search_symbols(
     store: SqliteStore,
     query: str,
@@ -68,7 +102,8 @@ async def tool_search_symbols(
     """
     rows = await store.search_symbols(query, limit=limit)
     refs, truncated = to_refs(rows, limit)
-    return GraphResult(nodes=refs, count=len(refs), truncated=truncated)
+    status = await _aggregate_status(store, "ok", [r.model_dump() for r in refs])
+    return GraphResult(nodes=refs, count=len(refs), resolver_status=status, truncated=truncated)
 
 
 async def tool_get_node_info(
@@ -78,7 +113,9 @@ async def tool_get_node_info(
 ) -> NodeInfoResult:
     """Return full info for a node: signature, docstring, source snippet.
 
-    Triggers on-access freshness check so the source is up-to-date.
+    Triggers on-access freshness check so the source is up-to-date. ``signature`` and
+    ``docstring`` are surfaced when the language adapter recorded them in node metadata;
+    ``source`` is always read live from disk for the node's span.
     """
     node = await store.get_node(node_id)
     if node is None:
@@ -87,7 +124,13 @@ async def tool_get_node_info(
     status = await _fresh_status(workspace, node, semantic=False)
     node = await store.get_node(node_id) or node
     source = _read_span(node.get("file_path"), node.get("span_json"))
-    return NodeInfoResult(node=NodeRef.from_row(node), source=source, resolver_status=status)
+    return NodeInfoResult(
+        node=NodeRef.from_row(node),
+        source=source,
+        signature=_first_meta(node.get("metadata_json"), _SIGNATURE_KEYS),
+        docstring=_first_meta(node.get("metadata_json"), _DOCSTRING_KEYS),
+        resolver_status=status,
+    )
 
 
 async def tool_get_file_structure(
@@ -122,9 +165,10 @@ async def _walk_tool(
     node = await store.get_node(node_id)
     if node is None:
         return GraphResult(error=f"Node {node_id!r} not found")
-    status = await _fresh_status(workspace, node, semantic=semantic)
+    base = await _fresh_status(workspace, node, semantic=semantic)
     rows = await query()
     refs, truncated = to_refs(rows, limit)
+    status = await _aggregate_status(store, base, rows)
     return GraphResult(nodes=refs, count=len(refs), resolver_status=status, truncated=truncated)
 
 

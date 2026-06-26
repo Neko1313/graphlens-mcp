@@ -30,6 +30,7 @@ dev = [
     "bandit>=1.8",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
 ]
 
 # ----------------------------------------------------------------------
@@ -96,7 +97,9 @@ skips = ["B608"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# A per-test ceiling so a single hang (e.g. a stalled DB worker) fails fast with a
+# traceback instead of stalling the whole run; integration analyze stays well under it.
+addopts = "-q --strict-markers --timeout=120"
 markers = [
     "unit: pure tests, no external processes",
     "integration: real graphlens analyze / filesystem / CLI",

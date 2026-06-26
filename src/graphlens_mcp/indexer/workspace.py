@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 _GRAPHLENS_DIR = ".graphlens"
 _DB_NAME = "graph.db"
 
+# Above this exposer-by-consumer product a single boundary stops synthesizing pairwise
+# COMMUNICATES_WITH edges (a hub topic would otherwise blow up quadratically).
+_MAX_BOUNDARY_FANOUT = 2000
+
 
 def default_db_path(project_root: Path) -> Path:
     """Return the default graph database location for *project_root*."""
@@ -91,20 +95,34 @@ class Workspace:
         return self._null_adapters[lang]
 
     async def close(self) -> None:
-        """Shut down pooled resolvers (e.g. ty LSP processes) and the store."""
+        """Shut down pooled resolvers (e.g. ty LSP processes) and the store.
+
+        Best-effort: prefer a public ``close``/``shutdown``/``stop`` on the adapter
+        itself; fall back to its private ``_resolver`` only when the adapter exposes no
+        public lifecycle hook. Idempotent — safe to call more than once.
+        """
         for adapter in self._adapters.values():
-            resolver = getattr(adapter, "_resolver", None)
+            if adapter is None:
+                continue
+            self._shutdown_one(adapter)
+        self._adapters.clear()
+        self._null_adapters.clear()
+        await self.store.close()
+
+    @staticmethod
+    def _shutdown_one(adapter: LanguageAdapter) -> None:
+        # Try the adapter's own lifecycle hook first (public API), then the resolver's.
+        for target in (adapter, getattr(adapter, "_resolver", None)):
+            if target is None:
+                continue
             for method in ("shutdown", "close", "stop"):
-                fn = getattr(resolver, method, None)
+                fn = getattr(target, method, None)
                 if callable(fn):
                     try:
                         fn()
                     except Exception as exc:  # pragma: no cover - best-effort cleanup
-                        logger.debug("Resolver shutdown for %s failed: %s", adapter, exc)
-                    break
-        self._adapters.clear()
-        self._null_adapters.clear()
-        await self.store.close()
+                        logger.debug("Shutdown via %s.%s failed: %s", target, method, exc)
+                    return
 
     # ------------------------------------------------------------------
     # Full index
@@ -124,24 +142,23 @@ class Workspace:
 
         merged_graph = GraphLens()
 
-        for lang in languages:
-            lang_report = report.get(lang)
-            if lang_report is None:
-                continue
+        # Analyze every applicable language concurrently — each analyze is a blocking
+        # call run in the executor and gated by the resolver semaphore. Persisting and
+        # merging stay sequential afterwards (writes serialize on the store's write lock
+        # and merge() mutates shared in-memory state), so only the slow parse/resolve
+        # phase is parallelized.
+        targets = [
+            lang
+            for lang in languages
+            if report.get(lang) is not None
+            and (a := self._adapter(lang)) is not None
+            and a.can_handle(self.project_root)
+        ]
+        graphs = await asyncio.gather(*(self._analyze_language(lang) for lang in targets))
 
-            adapter = self._adapter(lang)
-            if adapter is None:
+        for lang, graph in zip(targets, graphs, strict=True):
+            if graph is None:
                 continue
-            if not adapter.can_handle(self.project_root):
-                continue
-
-            logger.info("Indexing %s…", lang)
-            async with self._semaphore:
-                graph = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda a=adapter: a.analyze(self.project_root)
-                )
-            graph = _normalize_graph_paths(graph, self.project_root)
-
             resolver_status = ResolverStatus.from_value(
                 graph.metadata.get(RESOLVER_STATUS_KEY, "ok")
             )
@@ -156,7 +173,7 @@ class Workspace:
 
             stats["languages"][lang] = {
                 "status": resolver_status.value,
-                "hint": lang_report.get("hint"),
+                "hint": report[lang].get("hint"),
             }
 
         # Persist fileless structural nodes/edges (project/module hierarchy,
@@ -173,19 +190,44 @@ class Workspace:
         stats["files"] = await self.store.file_count()
         return stats
 
+    async def _analyze_language(self, lang: str) -> GraphLens | None:
+        """Run a full analyze for *lang* in the executor, gated by the semaphore."""
+        adapter = self._adapter(lang)
+        if adapter is None:
+            return None
+        logger.info("Indexing %s…", lang)
+        try:
+            async with self._semaphore:
+                graph = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda a=adapter: a.analyze(self.project_root)
+                )
+        except Exception as exc:
+            logger.warning("Analyze failed for %s: %s", lang, exc)
+            return None
+        return _normalize_graph_paths(graph, self.project_root)
+
     # ------------------------------------------------------------------
     # On-access freshness
     # ------------------------------------------------------------------
 
     async def ensure_fresh(self, file_path: Path, *, semantic: bool = False) -> str:
-        """Ensure file_path is up-to-date in the store.
+        """Ensure file_path is up-to-date in the store and report its graph status.
 
-        Returns the current file status: 'ok', 'skeleton', or 'degraded'.
-        If the file is missing from the store it is indexed immediately.
-        Uses the InFlightRegistry to avoid duplicate concurrent indexing.
+        Returns 'ok', 'skeleton', or 'degraded'. The file itself is re-indexed on
+        access when its bytes changed. For semantic queries the status is additionally
+        downgraded to 'degraded' when one of the file's *imported dependencies* changed
+        on disk: single-file analysis cannot re-resolve cross-file calls into the new
+        definition, so the stored edges may be stale until a full ``reindex`` — and the
+        agent should be told, not handed an 'ok' it cannot trust (transitive freshness).
         """
         path_str = str(file_path.resolve())
+        base = await self._ensure_fresh_self(file_path, path_str, semantic=semantic)
+        if semantic and base in ("ok", "degraded") and await self._dependency_stale(path_str):
+            return "degraded"
+        return base
 
+    async def _ensure_fresh_self(self, file_path: Path, path_str: str, *, semantic: bool) -> str:
+        """Freshness of *file_path* itself (no transitive dependency check)."""
         try:
             stat = Path(path_str).stat()
         except OSError:
@@ -206,6 +248,8 @@ class Workspace:
                         path_str,
                         lambda: self._index_semantic(file_path, stat),
                     )
+                    refreshed = await self.store.get_file_info(path_str)
+                    return refreshed["status"] if refreshed else info["status"]
                 return info["status"]
 
             # mtime/size differ — check content hash to avoid false positives
@@ -221,6 +265,26 @@ class Workspace:
         )
         new_info = await self.store.get_file_info(path_str)
         return new_info["status"] if new_info else "skeleton"
+
+    async def _dependency_stale(self, path_str: str) -> bool:
+        """Return True if any file *path_str* imports has changed/disappeared on disk.
+
+        Cheap on the common path: a stat per recorded dependency, hashing only when
+        mtime/size already differ (so a mere ``touch`` does not trigger a false stale).
+        """
+        for imported in await self.store.get_imported_files(path_str):
+            info = await self.store.get_file_info(imported)
+            if info is None:
+                continue  # never indexed as a tracked file; nothing to compare
+            try:
+                st = Path(imported).stat()
+            except OSError:
+                return True  # a dependency was deleted out from under us
+            if info["mtime"] == st.st_mtime and info["size"] == st.st_size:
+                continue
+            if _file_hash(imported) != info["hash"]:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Internal indexing
@@ -379,17 +443,29 @@ def _synthesize_cross_language_edges(graph: GraphLens) -> list[tuple[str, str, s
             continue
         boundary_ports.setdefault(rel.target_id, []).append((rel.source_id, rel.kind.value))
 
-    edges: list[tuple[str, str, str]] = []
-    for ports in boundary_ports.values():
-        exposers = [p[0] for p in ports if p[1] == "exposes"]
-        consumers = [p[0] for p in ports if p[1] == "consumes"]
+    edges: set[tuple[str, str, str]] = set()
+    for boundary_id, ports in boundary_ports.items():
+        exposers = {p[0] for p in ports if p[1] == "exposes"}
+        consumers = {p[0] for p in ports if p[1] == "consumes"}
+        fanout = len(exposers) * len(consumers)
+        if fanout > _MAX_BOUNDARY_FANOUT:
+            # A hub boundary (e.g. one queue topic with hundreds of consumers) would
+            # otherwise materialize a quadratic edge blow-up. Skip the synthesized
+            # pairwise edges; the boundary-based query still resolves connections.
+            logger.warning(
+                "Skipping COMMUNICATES_WITH synthesis for boundary %s: fan-out %d exceeds %d",
+                boundary_id,
+                fanout,
+                _MAX_BOUNDARY_FANOUT,
+            )
+            continue
         for src in exposers:
             for dst in consumers:
                 if src != dst:
-                    edges.append((src, dst, communicates))
-                    edges.append((dst, src, communicates))
+                    edges.add((src, dst, communicates))
+                    edges.add((dst, src, communicates))
 
-    return edges
+    return sorted(edges)
 
 
 def _detect_language(file_path: Path) -> str | None:

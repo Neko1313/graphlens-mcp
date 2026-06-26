@@ -52,6 +52,7 @@ it something like *"what breaks if I change the signature of `create_order`?"*.
 | `graphlens-mcp serve` | Start the MCP server over stdio. **Launched by the agent**, not by you |
 | `graphlens-mcp status` | Show detected languages, toolchain status, and graph size/freshness |
 | `graphlens-mcp reindex` | Force a full rebuild (e.g. after installing a new toolchain) |
+| `graphlens-mcp remove` | Deregister from agents and (with `--purge-db`) delete the local graph |
 
 Useful `init` flags: `--root <dir>`, `--agent claude_code --agent cursor` (repeatable),
 `--no-agent`, `--no-skills`, `--db <path>`.
@@ -101,13 +102,15 @@ disk prunes its symbols from the graph on the next access.
 ## Known limitations
 
 - **Transitive freshness:** if file `B` changes, the semantics of a file `A` that imports it
-  may reflect `B`'s old signature until `A` is queried again. Transitive invalidation is
-  planned.
+  can reflect `B`'s old signature until a full `reindex`. A semantic query on `A` now
+  **detects** this (it checks whether `A`'s recorded dependencies changed on disk) and
+  reports `resolver_status: degraded` instead of a false `ok` — single-file analysis cannot
+  re-resolve a cross-file call on its own. Run `reindex` for exact cross-file edges.
 - **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
   rebuilt on a full `reindex`; they can erode across incremental edits (the boundary-based
   query still resolves connections). Run `reindex` for an exact cross-language view.
-- **No `remove`/`clean` command yet:** to fully detach, delete `.graphlens/` and remove the
-  `graphlens` entry from your agent's MCP config by hand.
+- **Detaching:** `graphlens-mcp remove` deregisters the server from your agents; add
+  `--purge-db` to also delete the local `.graphlens/` cache.
 
 ## License
 

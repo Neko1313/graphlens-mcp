@@ -8,6 +8,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A hung test (e.g. a stalled aiosqlite worker) must fail the job fast, not burn
+    # the whole runner budget. pytest-timeout caps individual tests; this caps the job.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
