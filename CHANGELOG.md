@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-06-27
+### Bug Fixes
+
+- **indexer**: fix(indexer): route incremental re-index by workspace package root by @Neko1313 in [#3](https://github.com/Neko1313/graphlens-mcp/pull/3)
+
+
+
+
+**Full Changelog**: https://github.com/Neko1313/graphlens-mcp/compare/v0.1.1...v0.1.2
 ## [0.1.1] - 2026-06-27
 ### Bug Fixes
 
