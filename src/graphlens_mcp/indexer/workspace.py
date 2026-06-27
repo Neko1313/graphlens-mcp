@@ -34,7 +34,11 @@ from graphlens_mcp.indexer.concurrency import (
     MAX_CONCURRENT_RESOLVERS,
     InFlightRegistry,
 )
-from graphlens_mcp.indexer.resolvers import doctor, get_adapter
+from graphlens_mcp.indexer.resolvers import (
+    doctor,
+    find_language_roots,
+    get_adapter,
+)
 from graphlens_mcp.store.sqlite_store import SqliteStore
 
 if TYPE_CHECKING:
@@ -110,6 +114,10 @@ class Workspace:
         # resolver objects) is reused across the full index and every
         # re-index. (Invariant: resolver off the request hot path.)
         self._adapters: dict[str, LanguageAdapter | None] = {}
+        # Per-language workspace roots (one per package in a monorepo),
+        # cached for the Workspace lifetime and refreshed lazily when a
+        # changed file falls outside every cached root (a new package).
+        self._lang_roots: dict[str, list[Path]] = {}
         self._watch_task: asyncio.Task[None] | None = None
         # Serializes reindex_connected so a watcher re-index and an on-access
         # re-index of overlapping files cannot interleave read/prune/write.
@@ -412,15 +420,68 @@ class Workspace:
                 await self._reindex_lang(lang, paths)
 
     async def _reindex_lang(self, lang: str, paths: list[Path]) -> None:
-        """Full-analyze *paths* of one language and persist each file."""
+        """
+        Re-analyze *paths* of one language, grouped by owning package root.
+
+        A monorepo (uv / pnpm / cargo workspace) holds several independent
+        packages of the same language. The full index analyzes each package
+        root separately, keying node ids off the *package* name and its
+        package-relative module path. Passing the repository root with
+        ``files=`` instead would make the engine treat the whole monorepo as
+        one project — re-keying a member's symbols under the wrong project and
+        breaking every cross-file edge into them. So each changed file is
+        routed to the same root the full index used for it; a plain
+        single-package repo collapses to one group (the project root) and is
+        unaffected.
+        """
         adapter = self._adapter(lang)
         if adapter is None:
             return
+        for root, group in self._group_by_root(lang, paths).items():
+            await self._reindex_group(adapter, lang, root, group)
+
+    def _group_by_root(
+        self, lang: str, paths: list[Path]
+    ) -> dict[Path, list[Path]]:
+        """Route each changed file to its owning package root."""
+        roots = self._roots_for(lang, paths)
+        groups: dict[Path, list[Path]] = {}
+        for path in paths:
+            root = _nearest_root(path, roots) or self.project_root
+            groups.setdefault(root, []).append(path)
+        return groups
+
+    def _roots_for(self, lang: str, paths: list[Path]) -> list[Path]:
+        """
+        Return the cached package roots for *lang*, refreshing if stale.
+
+        A cache miss (a changed file under no known root) means a package was
+        likely added since the last discovery, so re-discover before routing.
+        """
+        cached = self._lang_roots.get(lang)
+        if cached is not None and all(
+            _nearest_root(p, cached) is not None for p in paths
+        ):
+            return cached
+        roots = find_language_roots(lang, self.project_root)
+        self._lang_roots[lang] = roots
+        return roots
+
+    async def _reindex_group(
+        self,
+        adapter: LanguageAdapter,
+        lang: str,
+        root: Path,
+        paths: list[Path],
+    ) -> None:
+        """Full-analyze one package root's changed *paths* and persist each."""
         async with self._semaphore:
             graph = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: adapter.analyze(self.project_root, files=paths)
+                None, lambda: adapter.analyze(root, files=paths)
             )
-        graph = _normalize_graph_paths(graph, self.project_root)
+        # Relative FILE paths emitted by the engine are relative to the root
+        # it analyzed (the package root), so normalize against that root.
+        graph = _normalize_graph_paths(graph, root)
         file_status = _resolver_to_file_status(
             ResolverStatus.from_value(
                 graph.metadata.get(RESOLVER_STATUS_KEY, "ok")
@@ -485,6 +546,19 @@ class Workspace:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _nearest_root(file: Path, roots: list[Path]) -> Path | None:
+    """Return the deepest root in *roots* that contains *file*, or None."""
+    best: Path | None = None
+    for root in roots:
+        try:
+            file.relative_to(root)
+        except ValueError:
+            continue
+        if best is None or len(root.parts) > len(best.parts):
+            best = root
+    return best
 
 
 async def _astat(path: str | Path) -> os.stat_result:

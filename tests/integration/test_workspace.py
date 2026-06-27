@@ -210,6 +210,72 @@ async def test_watcher_prunes_deleted_file(py_project: Path, monkeypatch):
         await ws.close()
 
 
+async def _func_row(ws: Workspace, name: str) -> dict:
+    hits = await ws.store.search_symbols(name)
+    return next(
+        h for h in hits if h["name"] == name and h["kind"] == "function"
+    )
+
+
+async def test_workspace_member_edit_keeps_stable_node_ids(
+    py_workspace: Path,
+):
+    # Regression: editing a file inside a uv-workspace member used to re-key
+    # its symbols under the repo root (wrong project name + a
+    # "packages.backend.pkg.*" qualified name + a new node id), which broke
+    # every cross-file edge into them. The member edit must preserve the
+    # node id, the package-relative qualified name, and the caller edges.
+    ws = await _indexed(py_workspace)
+    try:
+        before = await _func_row(ws, "helper")
+        assert before["qualified_name"] == "pkg.a.helper"
+        callers_before = {
+            n["name"] for n in await ws.store.get_callers(before["id"])
+        }
+        assert {"main", "use"} <= callers_before
+
+        b_py = py_workspace / "packages" / "backend" / "pkg" / "b.py"
+        b_py.write_text(
+            b_py.read_text() + "\n\ndef added():\n    return helper(2)\n"
+        )
+        await ws.ensure_fresh(b_py)
+
+        after = await _func_row(ws, "helper")
+        assert after["id"] == before["id"]
+        assert after["qualified_name"] == "pkg.a.helper"
+        callers_after = {
+            n["name"] for n in await ws.store.get_callers(after["id"])
+        }
+        assert {"main", "use", "added"} <= callers_after
+    finally:
+        await ws.store.close()
+
+
+async def test_workspace_members_indexed_under_own_project_names(
+    py_workspace: Path,
+):
+    # Each member is its own project root, so node ids must key off the
+    # member's package layout — never the repo directory name. After an edit,
+    # the symbol's qualified name stays member-relative rather than picking up
+    # the "packages/<member>" prefix.
+    ws = await _indexed(py_workspace)
+    try:
+        shared = await _func_row(ws, "shared_helper")
+        assert shared["qualified_name"] == "shared.util.shared_helper"
+
+        util_py = py_workspace / "packages" / "shared" / "shared" / "util.py"
+        util_py.write_text(
+            util_py.read_text() + "\n\ndef extra():\n    return 1\n"
+        )
+        await ws.ensure_fresh(util_py)
+
+        after = await _func_row(ws, "shared_helper")
+        assert after["qualified_name"] == "shared.util.shared_helper"
+        assert not after["qualified_name"].startswith("packages")
+    finally:
+        await ws.store.close()
+
+
 async def test_close_is_idempotent(py_project: Path):
     ws = await _indexed(py_project)
     await ws.close()
