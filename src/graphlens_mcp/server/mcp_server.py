@@ -174,13 +174,14 @@ def run_server(
 
     async def _main() -> None:
         workspace = await Workspace.create(project_root, db_path)
-        # Catch up on files created/deleted/edited while the server was down,
-        # then let the watcher keep the graph fresh from here on.
-        await workspace.reconcile()
-        if watch:
-            workspace.start_watching()
         mcp = create_mcp(workspace.store, workspace)
         try:
+            # Catch up on files created/deleted/edited while the server was
+            # down, then let the watcher keep the graph fresh from here on.
+            # Inside the try so close() still runs if reconcile/watch fails.
+            await workspace.reconcile()
+            if watch:
+                workspace.start_watching()
             await mcp.run_stdio_async()
         finally:
             # Release the DB connection and shut down resolver/LSP

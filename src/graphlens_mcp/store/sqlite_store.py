@@ -228,7 +228,10 @@ class SqliteStore:
         incrementally-indexed graphs too, since it reads persisted
         nodes/edges directly.
         """
-        sql = """
+        # The module-target branch matches a fileless MODULE node's qualified
+        # name with a left-anchored LIKE; `_`/`%`/`\` in the module name are
+        # escaped (ESCAPE '\') so e.g. `pkg.sub_mod` is not a `_` wildcard.
+        sql = r"""
         SELECT DISTINCT tn.file_path AS dep
         FROM edges e
         JOIN nodes sn ON sn.id = e.source_id AND sn.file_path = :imp
@@ -241,7 +244,10 @@ class SqliteStore:
         JOIN nodes tmod ON tmod.id = e.target_id AND tmod.file_path IS NULL
         JOIN nodes m ON m.file_path IS NOT NULL
           AND (m.qualified_name = tmod.qualified_name
-               OR m.qualified_name LIKE tmod.qualified_name || '.%')
+               OR m.qualified_name LIKE
+                  replace(replace(replace(
+                    tmod.qualified_name, '\', '\\'), '%', '\%'), '_', '\_')
+                  || '.%' ESCAPE '\')
         WHERE e.kind = 'imports'
         """
         async with self._read_conn.execute(sql, {"imp": importer_path}) as cur:
@@ -260,7 +266,7 @@ class SqliteStore:
         the files connected to a changed/deleted file so their cross-file
         edges stay correct.
         """
-        sql = """
+        sql = r"""
         SELECT DISTINCT sn.file_path AS importer
         FROM edges e
         JOIN nodes sn ON sn.id = e.source_id AND sn.file_path IS NOT NULL
@@ -273,7 +279,10 @@ class SqliteStore:
         JOIN nodes tmod ON tmod.id = e.target_id AND tmod.file_path IS NULL
         JOIN nodes m ON m.file_path = :imp
           AND (m.qualified_name = tmod.qualified_name
-               OR m.qualified_name LIKE tmod.qualified_name || '.%')
+               OR m.qualified_name LIKE
+                  replace(replace(replace(
+                    tmod.qualified_name, '\', '\\'), '%', '\%'), '_', '\_')
+                  || '.%' ESCAPE '\')
         WHERE e.kind = 'imports'
         """
         async with self._read_conn.execute(sql, {"imp": imported_path}) as cur:
@@ -305,7 +314,9 @@ class SqliteStore:
             file_paths,
         ) as cur:
             rows = await cur.fetchall()
-        statuses = [r["status"] for r in rows] if rows else ["degraded"]
+        # No rows = none of these paths are tracked; absence is not evidence of
+        # degradation, so default to "ok" rather than inventing a worse status.
+        statuses = [r["status"] for r in rows] if rows else ["ok"]
         return _worst_status(*statuses)
 
     # ------------------------------------------------------------------

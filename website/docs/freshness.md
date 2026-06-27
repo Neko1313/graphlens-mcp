@@ -36,7 +36,7 @@ files, prunes vanished ones, and refreshes any that changed — then hands off t
 
 - **Connected-set, not whole-project, re-link:** a change re-analyzes the changed file with
   its direct importers and imports, so cross-file edges within that set are correct, but a
-  rename that ripples through several indirection layers may need a full `reindex` for an
-  exact graph.
+  rename that ripples through several indirection layers — or creating a file that an
+  *unchanged* file already imports — may need a full `reindex` for an exact graph.
 - **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
   rebuilt on a full `reindex`; the boundary-based query still resolves connections in between.

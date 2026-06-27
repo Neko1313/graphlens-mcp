@@ -119,8 +119,8 @@ watcher.
 ## Known limitations
 
 - **Whole-project re-link:** the watcher re-links the *connected set* of a change, not the
-  entire project. A rename that ripples through many indirection layers may need a full
-  `reindex` for an exact graph.
+  entire project. A rename that ripples through many indirection layers — or creating a file
+  that an *unchanged* file already imports — may need a full `reindex` for an exact graph.
 - **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
   rebuilt on a full `reindex`; they can erode across incremental edits (the boundary-based
   query still resolves connections). Run `reindex` for an exact cross-language view.

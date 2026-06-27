@@ -115,9 +115,9 @@ async def tool_search_symbols(
     """
     rows = await store.search_symbols(query, limit=limit)
     refs, truncated = to_refs(rows, limit)
-    status = await _aggregate_status(
-        store, "ok", [r.model_dump() for r in refs]
-    )
+    # Aggregate over the full result set (pre-cap) so a degraded file truncated
+    # out of the response still lowers the reported status.
+    status = await _aggregate_status(store, "ok", rows)
     return GraphResult(
         nodes=refs,
         count=len(refs),

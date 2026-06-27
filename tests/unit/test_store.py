@@ -221,6 +221,39 @@ async def test_imported_paths_round_trip(store):
     assert await store.get_imported_paths("/b.py") == ["/a.py"]
 
 
+async def test_imported_files_escapes_underscore_in_module_name(store):
+    # b imports the fileless MODULE node `pkg.sub_mod`. A sibling file whose
+    # module is `pkg.subXmod` must NOT match — the '_' is a literal, not a LIKE
+    # single-char wildcard.
+    use = make_node("b.use", file_path="/b.py")
+    mod = make_node("pkg.sub_mod", kind=NodeKind.MODULE, file_path=None)
+    real = make_node("pkg.sub_mod.helper", file_path="/sub_mod.py")
+    sibling = make_node("pkg.subXmod.foo", file_path="/subXmod.py")
+    await store.apply_patch(
+        graph_of([real], []), "/sub_mod.py", "h", 1.0, 1, "ok", "python"
+    )
+    await store.apply_patch(
+        graph_of([sibling], []), "/subXmod.py", "h", 1.0, 1, "ok", "python"
+    )
+    await store.apply_patch(
+        graph_of([use], [make_relation(use, mod, RelationKind.IMPORTS)]),
+        "/b.py",
+        "h",
+        1.0,
+        1,
+        "ok",
+        "python",
+    )
+    await store.apply_structural(graph_of([mod], []))
+    # Act
+    deps = set(await store.get_imported_files("/b.py"))
+    importers = set(await store.get_importer_files("/sub_mod.py"))
+    # Assert: only the real module file matches, not the `_`-wildcard sibling
+    assert deps == {"/sub_mod.py"}
+    assert "/subXmod.py" not in deps
+    assert importers == {"/b.py"}
+
+
 async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
     # Arrange: exposer (server) and consumer (client) meet at one HTTP boundary
     server = make_node("svc.get_user", file_path="/svc.py")

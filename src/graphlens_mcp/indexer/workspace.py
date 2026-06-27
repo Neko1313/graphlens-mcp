@@ -111,6 +111,9 @@ class Workspace:
         # re-index. (Invariant: resolver off the request hot path.)
         self._adapters: dict[str, LanguageAdapter | None] = {}
         self._watch_task: asyncio.Task[None] | None = None
+        # Serializes reindex_connected so a watcher re-index and an on-access
+        # re-index of overlapping files cannot interleave read/prune/write.
+        self._reindex_lock = asyncio.Lock()
 
     @classmethod
     async def create(cls, project_root: Path, db_path: Path) -> Workspace:
@@ -153,21 +156,24 @@ class Workspace:
     async def _watch_loop(self) -> None:
         """Re-index the connected set of every changed source file."""
         exts = set(_get_ext_map())
-        async for changes in awatch(self.project_root):
-            paths: set[str] = set()
-            for _change, raw in changes:
-                p = Path(raw)
-                if _GRAPHLENS_DIR in p.parts or p.suffix not in exts:
-                    continue
-                paths.add(await _aresolve(p))
-            if not paths:
-                continue
+        while True:
             try:
-                await self.reindex_connected(paths)
+                async for changes in awatch(self.project_root):
+                    paths: set[str] = set()
+                    for _change, raw in changes:
+                        p = Path(raw)
+                        if _GRAPHLENS_DIR in p.parts or p.suffix not in exts:
+                            continue
+                        paths.add(await _aresolve(p))
+                    if paths:
+                        await self.reindex_connected(paths)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Watch re-index failed: %s", exc)
+                # A re-index error or a transient watcher error must not kill
+                # the loop for good; log and re-establish the watch shortly.
+                logger.warning("Watcher error; restarting: %s", exc)
+                await asyncio.sleep(1.0)
 
     async def close(self) -> None:
         """
@@ -312,6 +318,13 @@ class Workspace:
         disk = await self._discover_source_files()
         db_paths = {row["path"] for row in await self.store.list_files()}
 
+        # Empty store (e.g. a fresh DB): the parallel full index is faster and
+        # simpler than feeding the whole tree through the connected-set path.
+        if not db_paths:
+            if disk:
+                await self.full_index()
+            return len(disk)
+
         to_refresh: set[str] = db_paths - disk  # deleted on disk
         for path_str in disk:
             if path_str not in db_paths:
@@ -328,7 +341,7 @@ class Workspace:
             changed = (
                 info["mtime"] != stat.st_mtime or info["size"] != stat.st_size
             )
-            if changed and _file_hash(path_str) != info["hash"]:
+            if changed and await _ahash(path_str) != info["hash"]:
                 to_refresh.add(path_str)  # edited while the server was down
 
         if to_refresh:
@@ -365,35 +378,38 @@ class Workspace:
         the files it imports. Analyzing the set together lets the resolver
         re-link calls across those files, so the result is a full graph for
         the affected region — not a single-file approximation. Deleted files
-        are pruned and their importers refreshed.
+        are pruned and their importers refreshed. Serialized by
+        ``_reindex_lock`` so a watcher re-index and an on-access re-index of
+        overlapping files cannot interleave their read/prune/write phases.
         """
-        affected: set[str] = set()
-        deleted: set[str] = set()
-        for raw in changed:
-            path_str = await _aresolve(Path(raw))
-            # Compute connections from the *current* graph, before pruning.
-            connected = set(await self.store.get_importer_files(path_str))
-            connected |= set(await self.store.get_imported_files(path_str))
-            affected |= connected
-            if await _exists(path_str):
-                affected.add(path_str)
-            else:
-                deleted.add(path_str)
+        async with self._reindex_lock:
+            affected: set[str] = set()
+            deleted: set[str] = set()
+            for raw in changed:
+                path_str = await _aresolve(Path(raw))
+                # Connections come from the *current* graph, before pruning.
+                connected = set(await self.store.get_importer_files(path_str))
+                connected |= set(await self.store.get_imported_files(path_str))
+                affected |= connected
+                if await _exists(path_str):
+                    affected.add(path_str)
+                else:
+                    deleted.add(path_str)
 
-        for path_str in deleted:
-            await self.store.delete_file(path_str)
-            logger.info("Pruned deleted file from graph: %s", path_str)
+            for path_str in deleted:
+                await self.store.delete_file(path_str)
+                logger.info("Pruned deleted file from graph: %s", path_str)
 
-        by_lang: dict[str, list[Path]] = {}
-        for path_str in affected - deleted:
-            if not await _exists(path_str):
-                continue
-            lang = _detect_language(Path(path_str))
-            if lang is not None:
-                by_lang.setdefault(lang, []).append(Path(path_str))
+            by_lang: dict[str, list[Path]] = {}
+            for path_str in affected - deleted:
+                if not await _exists(path_str):
+                    continue
+                lang = _detect_language(Path(path_str))
+                if lang is not None:
+                    by_lang.setdefault(lang, []).append(Path(path_str))
 
-        for lang, paths in by_lang.items():
-            await self._reindex_lang(lang, paths)
+            for lang, paths in by_lang.items():
+                await self._reindex_lang(lang, paths)
 
     async def _reindex_lang(self, lang: str, paths: list[Path]) -> None:
         """Full-analyze *paths* of one language and persist each file."""
@@ -420,7 +436,7 @@ class Workspace:
             await self.store.apply_patch(
                 sub,
                 path_str,
-                _file_hash(path_str),
+                await _ahash(path_str),
                 stat.st_mtime,
                 stat.st_size,
                 file_status,
@@ -453,7 +469,7 @@ class Workspace:
         if info is not None:
             if info["mtime"] == stat.st_mtime and info["size"] == stat.st_size:
                 return info["status"]
-            if _file_hash(path_str) == info["hash"]:
+            if await _ahash(path_str) == info["hash"]:
                 await self.store.update_file_mtime(
                     path_str, stat.st_mtime, stat.st_size
                 )
@@ -474,6 +490,11 @@ class Workspace:
 async def _astat(path: str | Path) -> os.stat_result:
     """Stat *path* off the event loop (keeps blocking FS out of async)."""
     return await asyncio.to_thread(Path(path).stat)
+
+
+async def _ahash(path: str) -> str:
+    """Content-hash *path* off the event loop."""
+    return await asyncio.to_thread(_file_hash, path)
 
 
 async def _aresolve(path: Path) -> str:
@@ -535,7 +556,7 @@ async def _persist_graph(
                 file_path,
             )
             continue
-        file_hash = _file_hash(file_path)
+        file_hash = await _ahash(file_path)
         sub = graph.subgraph_for_file(file_path)
         await store.apply_patch(
             sub,
