@@ -386,38 +386,91 @@ class Workspace:
         the files it imports. Analyzing the set together lets the resolver
         re-link calls across those files, so the result is a full graph for
         the affected region — not a single-file approximation. Deleted files
-        are pruned and their importers refreshed. Serialized by
-        ``_reindex_lock`` so a watcher re-index and an on-access re-index of
-        overlapping files cannot interleave their read/prune/write phases.
+        are pruned and their importers refreshed.
+
+        After the first pass a *second importer pass* runs: a brand-new file
+        has no graph nodes when the connected set is first computed, so an
+        *unchanged* file that imports it is invisible to ``get_importer_files``
+        and keeps a dangling edge into the new file. Now that the new file is
+        indexed its importers resolve, so they are re-indexed too — closing
+        the "new file an unchanged file imports" gap without a full reindex.
+        Finally COMMUNICATES_WITH is re-synthesized for every boundary the
+        re-indexed files touch, so cross-language edges do not erode.
+
+        Serialized by ``_reindex_lock`` so a watcher re-index and an on-access
+        re-index of overlapping files cannot interleave read/prune/write.
         """
         async with self._reindex_lock:
-            affected: set[str] = set()
-            deleted: set[str] = set()
-            for raw in changed:
-                path_str = await _aresolve(Path(raw))
-                # Connections come from the *current* graph, before pruning.
-                connected = set(await self.store.get_importer_files(path_str))
-                connected |= set(await self.store.get_imported_files(path_str))
-                affected |= connected
-                if await _exists(path_str):
-                    affected.add(path_str)
-                else:
-                    deleted.add(path_str)
+            changed_paths = {await _aresolve(Path(raw)) for raw in changed}
+            affected, deleted = await self._connected_set(changed_paths)
 
             for path_str in deleted:
                 await self.store.delete_file(path_str)
                 logger.info("Pruned deleted file from graph: %s", path_str)
 
-            by_lang: dict[str, list[Path]] = {}
-            for path_str in affected - deleted:
+            reindexed = await self._reindex_files(affected - deleted)
+
+            # Second importer pass: importers of a now-indexed new file that
+            # the first pass could not yet see. Re-link each together with its
+            # imports (which now include the new file) so cross-file CALL edges
+            # resolve — a lone single-file analysis could not see the new
+            # definition.
+            followup: set[str] = set()
+            for path_str in changed_paths - deleted:
                 if not await _exists(path_str):
                     continue
-                lang = _detect_language(Path(path_str))
-                if lang is not None:
-                    by_lang.setdefault(lang, []).append(Path(path_str))
+                for importer in await self.store.get_importer_files(path_str):
+                    if importer != path_str and importer not in reindexed:
+                        followup.add(importer)
+            if followup:
+                extra, _ = await self._connected_set(followup)
+                reindexed |= await self._reindex_files(extra)
 
-            for lang, paths in by_lang.items():
-                await self._reindex_lang(lang, paths)
+            if reindexed:
+                await self._resynthesize_cross_language(reindexed)
+
+    async def _connected_set(
+        self, changed_paths: set[str]
+    ) -> tuple[set[str], set[str]]:
+        """Return (affected, deleted) for *changed_paths* from the graph."""
+        affected: set[str] = set()
+        deleted: set[str] = set()
+        for path_str in changed_paths:
+            # Connections come from the *current* graph, before pruning.
+            connected = set(await self.store.get_importer_files(path_str))
+            connected |= set(await self.store.get_imported_files(path_str))
+            affected |= connected
+            if await _exists(path_str):
+                affected.add(path_str)
+            else:
+                deleted.add(path_str)
+        return affected, deleted
+
+    async def _reindex_files(self, paths: set[str]) -> set[str]:
+        """Re-index existing *paths* by language; return the set done."""
+        by_lang: dict[str, list[Path]] = {}
+        reindexed: set[str] = set()
+        for path_str in paths:
+            if not await _exists(path_str):
+                continue
+            lang = _detect_language(Path(path_str))
+            if lang is not None:
+                by_lang.setdefault(lang, []).append(Path(path_str))
+                reindexed.add(path_str)
+        for lang, group in by_lang.items():
+            await self._reindex_lang(lang, group)
+        return reindexed
+
+    async def _resynthesize_cross_language(self, file_paths: set[str]) -> None:
+        """Rebuild COMMUNICATES_WITH for boundaries *file_paths* touch."""
+        ports = await self.store.get_boundary_ports_for_files(
+            sorted(file_paths)
+        )
+        if not ports:
+            return
+        edges = _edges_from_boundary_ports(ports)
+        participants = {nid for plist in ports.values() for nid, _ in plist}
+        await self.store.resynthesize_cross_language(edges, participants)
 
     async def _reindex_lang(self, lang: str, paths: list[Path]) -> None:
         """
@@ -648,7 +701,6 @@ def _synthesize_cross_language_edges(
 ) -> list[tuple[str, str, str]]:
     """Synthesize COMMUNICATES_WITH between nodes sharing BOUNDARY targets."""
     boundary_kind = "boundary"
-    communicates = RelationKind.COMMUNICATES_WITH.value
 
     # boundary_id -> list of (node_id, role) where role is 'exposes' or
     # 'consumes'
@@ -663,10 +715,27 @@ def _synthesize_cross_language_edges(
             (rel.source_id, rel.kind.value)
         )
 
+    return _edges_from_boundary_ports(boundary_ports)
+
+
+def _edges_from_boundary_ports(
+    boundary_ports: dict[str, list[tuple[str, str]]],
+) -> list[tuple[str, str, str]]:
+    """
+    Synthesize bidirectional COMMUNICATES_WITH for each boundary's ports.
+
+    Shared by the full-index pass (which reads ports off the in-memory graph)
+    and the incremental re-synthesis pass (which reads them back from the
+    store), so both produce an identical edge set for the same boundaries.
+    """
+    communicates = RelationKind.COMMUNICATES_WITH.value
+    exposes = RelationKind.EXPOSES.value
+    consumes = RelationKind.CONSUMES.value
+
     edges: set[tuple[str, str, str]] = set()
     for boundary_id, ports in boundary_ports.items():
-        exposers = {p[0] for p in ports if p[1] == "exposes"}
-        consumers = {p[0] for p in ports if p[1] == "consumes"}
+        exposers = {p[0] for p in ports if p[1] == exposes}
+        consumers = {p[0] for p in ports if p[1] == consumes}
         fanout = len(exposers) * len(consumers)
         if fanout > _MAX_BOUNDARY_FANOUT:
             # A hub boundary (e.g. one queue topic with hundreds of

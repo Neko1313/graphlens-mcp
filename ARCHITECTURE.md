@@ -114,4 +114,14 @@ relative paths resolve against the project root, not the server cwd.
   its direct importers and imports, so cross-file edges within that set are correct, but a
   change that ripples through several indirection layers may need a full `reindex` for an
   exact graph. The golden test scopes the `batch == incremental` invariant to file-bearing
-  nodes (and to full edge identity for a self-contained file).
+  nodes (and to full edge identity for a self-contained file). A new file an *unchanged*
+  file already imports is covered by a second importer pass in `reindex_connected`: once the
+  new file is indexed its importers resolve and are re-linked, so the dangling edge into it
+  is rebuilt without a full reindex.
+- **Cross-language edge erosion (mitigated):** `COMMUNICATES_WITH` is synthesized by the
+  full-index link pass, never by single-file analysis, so an incremental patch preserves the
+  edges it cannot re-emit. After each connected-set re-index, `_resynthesize_cross_language`
+  rebuilds the pairwise edges for every boundary the re-indexed files touch (and prunes
+  dangling ones), so a new or renamed exposer/consumer is linked immediately. A full
+  `reindex` remains the exact escape hatch for a participant that leaves a boundary other
+  files still use.

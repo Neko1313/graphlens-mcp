@@ -549,6 +549,90 @@ class SqliteStore:
                     (source_id, target_id, kind),
                 )
 
+    async def get_boundary_ports_for_files(
+        self, file_paths: list[str]
+    ) -> dict[str, list[tuple[str, str]]]:
+        """
+        Return ``boundary_id -> [(node_id, role)]`` for touched boundaries.
+
+        A boundary is "touched" when any node owned by one of *file_paths*
+        exposes or consumes it. The returned ports include *every* participant
+        of those boundaries (not only the ones in *file_paths*), so the caller
+        can re-synthesize the complete pairwise COMMUNICATES_WITH set for the
+        affected boundaries after an incremental re-index. ``role`` is the
+        edge kind (``exposes`` / ``consumes``).
+        """
+        if not file_paths:
+            return {}
+        # placeholders is a count of '?' binds, never user data.
+        placeholders = ",".join("?" * len(file_paths))
+        boundary_sql = f"""
+        SELECT DISTINCT e.target_id AS bid
+        FROM edges e
+        JOIN nodes b ON b.id = e.target_id AND b.kind = 'boundary'
+        JOIN nodes n ON n.id = e.source_id AND n.file_path IN ({placeholders})
+        WHERE e.kind IN ('exposes', 'consumes')
+        """  # noqa: S608 — placeholders is a generated bind count
+        async with self._read_conn.execute(
+            boundary_sql, list(file_paths)
+        ) as cur:
+            bids = [r["bid"] for r in await cur.fetchall()]
+        if not bids:
+            return {}
+        bph = ",".join("?" * len(bids))
+        ports_sql = f"""
+        SELECT e.target_id AS bid, e.source_id AS nid, e.kind AS role
+        FROM edges e
+        WHERE e.kind IN ('exposes', 'consumes') AND e.target_id IN ({bph})
+        """  # noqa: S608 — bph is a generated bind count
+        async with self._read_conn.execute(ports_sql, bids) as cur:
+            rows = await cur.fetchall()
+        ports: dict[str, list[tuple[str, str]]] = {}
+        for r in rows:
+            ports.setdefault(r["bid"], []).append((r["nid"], r["role"]))
+        return ports
+
+    async def resynthesize_cross_language(
+        self,
+        edges: list[tuple[str, str, str]],
+        participant_ids: set[str],
+    ) -> None:
+        """
+        Rebuild COMMUNICATES_WITH for the boundaries owning *participant_ids*.
+
+        :meth:`apply_patch` deliberately preserves COMMUNICATES_WITH (single-
+        file analysis can never re-emit it), so without this pass those edges
+        only erode across incremental edits — a renamed exposer leaves a
+        dangling edge, a new consumer gets none. This drops dangling edges
+        (an endpoint whose node is gone), clears the stale pairwise set among
+        *participant_ids*, then inserts the freshly synthesized *edges*. Scoped
+        to ``source AND target`` both in *participant_ids* so a participant's
+        edges to *other*, unaffected boundaries are left intact.
+        """
+        cw = RelationKind.COMMUNICATES_WITH.value
+        async with self._writing():
+            await self._conn.execute(
+                "DELETE FROM edges WHERE kind = ? "
+                "AND (source_id NOT IN (SELECT id FROM nodes) "
+                "OR target_id NOT IN (SELECT id FROM nodes))",
+                (cw,),
+            )
+            if participant_ids:
+                ids = list(participant_ids)
+                # placeholders is a count of '?' binds, never user data.
+                ph = ",".join("?" * len(ids))
+                await self._conn.execute(
+                    f"DELETE FROM edges WHERE kind = ? "  # noqa: S608
+                    f"AND source_id IN ({ph}) AND target_id IN ({ph})",
+                    [cw, *ids, *ids],
+                )
+            for source_id, target_id, kind in edges:
+                await self._conn.execute(
+                    "INSERT OR IGNORE INTO edges"
+                    "(source_id, target_id, kind) VALUES(?, ?, ?)",
+                    (source_id, target_id, kind),
+                )
+
     async def delete_file(self, file_path: str) -> bool:
         """
         Prune all graph state owned by *file_path* (e.g. deleted file).
