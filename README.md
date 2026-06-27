@@ -103,6 +103,11 @@ structure-only "skeleton" phase: every (re)index produces the full graph the res
 give. As a backstop, a tool that touches a file the watcher hasn't processed yet triggers the
 same connected re-index on access.
 
+Files created, deleted or edited *while the server was down* are invisible to an event-based
+watcher, so `serve` runs a one-shot **reconcile** at startup: it scans the project, indexes
+new files, prunes vanished ones, and refreshes any that changed — then hands off to the
+watcher.
+
 ## Known limitations
 
 - **Whole-project re-link:** the watcher re-links the *connected set* of a change, not the

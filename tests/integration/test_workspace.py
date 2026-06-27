@@ -131,6 +131,31 @@ async def test_deleting_a_dependency_prunes_and_refreshes_importers(
         await ws.store.close()
 
 
+async def test_reconcile_indexes_new_and_prunes_deleted(py_project: Path):
+    # Files created/removed while the server was down are caught by the
+    # one-shot startup reconcile, not the (event-only) watcher.
+    ws = await _indexed(py_project)
+    try:
+        pkg = py_project / "pkg"
+        new_py = pkg / "c.py"
+        new_py.write_text("def from_reconcile():\n    return 1\n")
+        b_py = pkg / "b.py"
+        b_abs = str(b_py.resolve())
+        b_py.unlink()
+
+        n = await ws.reconcile()
+
+        assert n >= 2  # new c.py indexed + deleted b.py pruned
+        new_abs = str(new_py.resolve())
+        assert any(
+            x["name"] == "from_reconcile"
+            for x in await ws.store.get_nodes_in_file(new_abs)
+        )
+        assert await ws.store.get_nodes_in_file(b_abs) == []
+    finally:
+        await ws.store.close()
+
+
 async def test_watcher_reindexes_edited_file(py_project: Path, monkeypatch):
     # End-to-end: the watcher (the single freshness mechanism) re-indexes a
     # file edited on disk without any tool query. Force polling so the test is

@@ -65,6 +65,26 @@ logger = logging.getLogger(__name__)
 _GRAPHLENS_DIR = ".graphlens"
 _DB_NAME = "graph.db"
 
+# Directories skipped when discovering source files on disk.
+_EXCLUDED_DIRS = frozenset(
+    {
+        _GRAPHLENS_DIR,
+        ".git",
+        ".hg",
+        ".svn",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "node_modules",
+        "dist",
+        "build",
+        ".eggs",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+    }
+)
+
 # Above this exposer-by-consumer product a single boundary stops
 # synthesizing pairwise COMMUNICATES_WITH edges (a hub topic would
 # otherwise blow up quadratically).
@@ -273,6 +293,64 @@ class Workspace:
             logger.warning("Analyze failed for %s: %s", lang, exc)
             return None
         return _normalize_graph_paths(graph, self.project_root)
+
+    # ------------------------------------------------------------------
+    # Startup reconcile (discover files changed while the server was down)
+    # ------------------------------------------------------------------
+
+    async def reconcile(self) -> int:
+        """
+        Reconcile the graph with the source files currently on disk.
+
+        The watcher only sees events while it runs, so files created, deleted
+        or edited *while the server was down* are invisible to it. This
+        one-shot scan (run at ``serve`` start, not on a timer) indexes new
+        files, prunes vanished ones, and refreshes any tracked file whose
+        bytes changed, then re-links each via :meth:`reindex_connected`.
+        Returns the number of files that needed work.
+        """
+        disk = await self._discover_source_files()
+        db_paths = {row["path"] for row in await self.store.list_files()}
+
+        to_refresh: set[str] = db_paths - disk  # deleted on disk
+        for path_str in disk:
+            if path_str not in db_paths:
+                to_refresh.add(path_str)  # new file
+                continue
+            info = await self.store.get_file_info(path_str)
+            try:
+                stat = await _astat(path_str)
+            except OSError:
+                continue
+            if info is None:
+                to_refresh.add(path_str)
+                continue
+            changed = (
+                info["mtime"] != stat.st_mtime or info["size"] != stat.st_size
+            )
+            if changed and _file_hash(path_str) != info["hash"]:
+                to_refresh.add(path_str)  # edited while the server was down
+
+        if to_refresh:
+            await self.reindex_connected(to_refresh)
+        return len(to_refresh)
+
+    async def _discover_source_files(self) -> set[str]:
+        """Return absolute paths of all known-language files under the root."""
+        exts = set(_get_ext_map())
+
+        def _walk() -> set[str]:
+            found: set[str] = set()
+            for path in self.project_root.rglob("*"):
+                if path.suffix not in exts or not path.is_file():
+                    continue
+                rel_parts = path.relative_to(self.project_root).parts
+                if _EXCLUDED_DIRS & set(rel_parts):
+                    continue
+                found.add(str(path.resolve()))
+            return found
+
+        return await asyncio.to_thread(_walk)
 
     # ------------------------------------------------------------------
     # Connected-set re-index (watcher + on-access)

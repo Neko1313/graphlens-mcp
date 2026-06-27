@@ -39,8 +39,12 @@ analyze, so a file is `ok` or (toolchain missing) `degraded`.
 
 `Workspace.ensure_fresh` is the on-access backstop: a tool that touches a changed file
 before the watcher has processed it runs the same `reindex_connected` (deduped through
-`InFlightRegistry`). New-file discovery (indexing files not yet tracked) is left to
-`reindex`.
+`InFlightRegistry`).
+
+Because an event-based watcher cannot see changes made while it was not running, `serve`
+calls `Workspace.reconcile` once at startup: it walks the project (`_discover_source_files`,
+excluding `.graphlens`/VCS/build dirs), diffs disk against the `files` table, and feeds the
+new/deleted/edited paths through `reindex_connected`. A wholesale rebuild remains `reindex`.
 
 ## Key invariants
 
