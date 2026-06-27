@@ -8,34 +8,31 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A hung test (e.g. a stalled DB worker) must fail the job fast, not burn the
+    # whole runner budget. pytest-timeout caps individual tests; this caps the job.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         # graphlens requires Python >= 3.13. Add "3.14" once its wheels are available.
         python-version: ["3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
 
-      - name: Sync dependencies
-        run: uv sync --group dev
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Lint (ruff)
-        run: uv run ruff check src tests
+      - name: Install dependencies
+        run: task install
 
-      - name: Format check (ruff)
-        run: uv run ruff format --check src tests
-
-      - name: Type check (ty)
-        run: uv run ty check src
-
-      - name: Security scan (bandit)
-        run: uv run bandit -c pyproject.toml -r src
-
-      - name: Tests (pytest)
-        run: uv run pytest
+      # Single gate: lint + format-check + typecheck + security + tests, so CI and
+      # a local `task check` run exactly the same steps.
+      - name: Check
+        run: task check

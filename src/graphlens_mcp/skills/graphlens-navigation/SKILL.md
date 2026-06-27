@@ -70,13 +70,13 @@ When asked "what breaks if I change X?":
 
 ## Respect resolver_status
 
-Each tool response includes `resolver_status`:
+Each tool response includes `resolver_status` (aggregated across every returned node's file):
 - `ok` — full semantic graph, edges are trustworthy
-- `degraded` — partial resolution; treat edges as approximate
-- `skeleton` — structure only, no resolved calls/types; flag this before drawing conclusions
+- `degraded` — calls/types not fully resolved (usually a missing language toolchain); treat
+  edges as approximate
 
-When status is `skeleton` or `degraded`, say so explicitly and suggest
-`graphlens-mcp reindex` or installing the missing toolchain.
+When status is `degraded`, say so explicitly and suggest `graphlens-mcp reindex` or
+installing the missing toolchain.
 
 ## Do NOT
 

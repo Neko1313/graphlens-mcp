@@ -18,7 +18,9 @@ from graphlens_mcp.indexer.workspace import Workspace, default_db_path
 from graphlens_mcp.server.mcp_server import run_server
 from graphlens_mcp.store.sqlite_store import SqliteStore
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="%(levelname)s %(name)s %(message)s"
+)
 logger = logging.getLogger("graphlens_mcp")
 
 
@@ -51,7 +53,8 @@ def main(verbose: bool) -> None:
     multiple=True,
     type=click.Choice(list(REGISTRY)),
     help="Agent(s) to configure non-interactively. Repeatable. "
-    "If omitted, an interactive selector is shown (TTY) or detected agents are used.",
+    "If omitted, an interactive selector is shown (TTY) or "
+    "detected agents are used.",
 )
 @click.option("--no-agent", is_flag=True, help="Skip agent configuration")
 @click.option("--no-skills", is_flag=True, help="Skip skill installation")
@@ -80,16 +83,32 @@ def init(
     click.echo("Checking toolchains…")
     report = doctor(root)
     if not report:
-        click.echo(click.style("  No supported languages detected in this directory.", fg="yellow"))
-        click.echo("  Supported: python, go, rust (and typescript/php with adapters installed)")
+        click.echo(
+            click.style(
+                "  No supported languages detected in this directory.",
+                fg="yellow",
+            )
+        )
+        click.echo(
+            "  Supported: python, go, rust "
+            "(and typescript/php with adapters installed)"
+        )
         return
 
     for lang, info in sorted(report.items()):
         status = info["status"]
         hint = info["hint"]
-        icon = "✓" if status == "ok" else ("~" if status == "degraded" else "✗")
-        color = "green" if status == "ok" else ("yellow" if status == "degraded" else "red")
-        click.echo(f"  {click.style(icon, fg=color)} {lang}: {status}", nl=False)
+        icon = (
+            "✓" if status == "ok" else ("~" if status == "degraded" else "✗")
+        )
+        color = (
+            "green"
+            if status == "ok"
+            else ("yellow" if status == "degraded" else "red")
+        )
+        click.echo(
+            f"  {click.style(icon, fg=color)} {lang}: {status}", nl=False
+        )
         if hint:
             click.echo(f" — {hint}", nl=False)
         click.echo()
@@ -106,7 +125,10 @@ def init(
 
     stats = asyncio.run(_index())
 
-    click.echo(f"  Indexed {stats['files']} files, {stats['nodes']} nodes, {stats['edges']} edges")
+    click.echo(
+        f"  Indexed {stats['files']} files, {stats['nodes']} nodes, "
+        f"{stats['edges']} edges"
+    )
     click.echo()
 
     # Configure agents
@@ -134,19 +156,35 @@ def init(
     help="Path to the graph database",
     type=click.Path(path_type=Path),
 )
-def serve(root: Path, db: Path | None) -> None:
-    """Start the MCP server (stdio transport). Launched by agents via config."""
+@click.option(
+    "--watch/--no-watch",
+    default=True,
+    show_default=True,
+    help="Watch the filesystem and re-index edited files automatically, "
+    "even if no tool queries them.",
+)
+def serve(
+    root: Path,
+    db: Path | None,
+    watch: bool,
+) -> None:
+    """
+    Start the MCP server (stdio transport).
+
+    Launched by agents via config.
+    """
     root = root.resolve()
     db_path = db or default_db_path(root)
 
     if not db_path.exists():
         click.echo(
-            f"Graph DB not found at {db_path}. Run `graphlens-mcp init` first.",
+            f"Graph DB not found at {db_path}. "
+            "Run `graphlens-mcp init` first.",
             err=True,
         )
         sys.exit(1)
 
-    run_server(db_path, root)
+    run_server(db_path, root, watch=watch)
 
 
 @main.command()
@@ -185,17 +223,26 @@ def status(root: Path, db: Path | None, as_json: bool) -> None:
     store_info = asyncio.run(_stats())
 
     if as_json:
-        click.echo(json.dumps({"toolchains": report, "store": store_info}, indent=2))
+        click.echo(
+            json.dumps({"toolchains": report, "store": store_info}, indent=2)
+        )
         return
 
     click.echo(f"Project: {root}")
-    click.echo(f"DB: {db_path}" + ("" if db_path.exists() else " (not found — run init)"))
+    click.echo(
+        f"DB: {db_path}"
+        + ("" if db_path.exists() else " (not found — run init)")
+    )
     click.echo()
 
     click.echo("Toolchains:")
     for lang, info in sorted(report.items()):
-        color = {"ok": "green", "degraded": "yellow"}.get(info["status"], "red")
-        click.echo(f"  {lang}: {click.style(info['status'], fg=color)}", nl=False)
+        color = {"ok": "green", "degraded": "yellow"}.get(
+            info["status"], "red"
+        )
+        click.echo(
+            f"  {lang}: {click.style(info['status'], fg=color)}", nl=False
+        )
         if info["hint"]:
             click.echo(f"  → {info['hint']}", nl=False)
         click.echo()
@@ -207,9 +254,13 @@ def status(root: Path, db: Path | None, as_json: bool) -> None:
             f"{store_info['edges']} edges, "
             f"{store_info['files']} files"
         )
-        stale = [f for f in store_info.get("file_list", []) if f["status"] != "ok"]
+        stale = [
+            f for f in store_info.get("file_list", []) if f["status"] != "ok"
+        ]
         if stale:
-            click.echo(f"  {len(stale)} file(s) with status != ok (skeleton/degraded)")
+            click.echo(
+                f"  {len(stale)} file(s) with status != ok (skeleton/degraded)"
+            )
 
 
 @main.command()
@@ -244,7 +295,10 @@ def reindex(root: Path, db: Path | None) -> None:
             await workspace.close()
 
     stats = asyncio.run(_reindex())
-    click.echo(f"Done. {stats['files']} files, {stats['nodes']} nodes, {stats['edges']} edges")
+    click.echo(
+        f"Done. {stats['files']} files, {stats['nodes']} nodes, "
+        f"{stats['edges']} edges"
+    )
 
 
 @main.command()
@@ -263,8 +317,12 @@ def reindex(root: Path, db: Path | None) -> None:
     type=click.Choice(list(REGISTRY)),
     help="Agent(s) to deregister from. Default: all known agents.",
 )
-@click.option("--purge-db", is_flag=True, help="Also delete the local graph database.")
-@click.option("--yes", "-y", is_flag=True, help="Do not prompt for confirmation.")
+@click.option(
+    "--purge-db", is_flag=True, help="Also delete the local graph database."
+)
+@click.option(
+    "--yes", "-y", is_flag=True, help="Do not prompt for confirmation."
+)
 def remove(
     root: Path,
     db: Path | None,
@@ -272,7 +330,7 @@ def remove(
     purge_db: bool,
     yes: bool,
 ) -> None:
-    """Deregister the MCP server from agents and optionally delete the graph."""
+    """Deregister the MCP server from agents; optionally delete graph."""
     root = root.resolve()
     db_path = db or default_db_path(root)
     targets = list(agent) or list(REGISTRY)
@@ -283,7 +341,10 @@ def remove(
         spec = REGISTRY[name]
         try:
             if deregister_agent(spec, root):
-                click.echo(f"  {click.style('✓', fg='green')} deregistered from {spec.label}")
+                click.echo(
+                    f"  {click.style('✓', fg='green')} "
+                    f"deregistered from {spec.label}"
+                )
                 removed_any = True
         except Exception as exc:
             click.echo(f"  Failed to update {spec.label}: {exc}", err=True)
@@ -306,7 +367,7 @@ def _is_interactive() -> bool:
 
 
 def _purge_graph_db(db_path: Path, *, yes: bool) -> None:
-    """Delete the graph database (and its WAL/SHM siblings) after confirmation."""
+    """Delete the graph database (and WAL/SHM siblings) after confirm."""
     if not db_path.exists():
         click.echo("  No graph database to delete.")
         return
@@ -314,7 +375,9 @@ def _purge_graph_db(db_path: Path, *, yes: bool) -> None:
         yes
         or (
             _is_interactive()
-            and click.confirm(f"  Delete graph database {db_path}?", default=False)
+            and click.confirm(
+                f"  Delete graph database {db_path}?", default=False
+            )
         )
     ):
         return
@@ -329,8 +392,14 @@ def _purge_graph_db(db_path: Path, *, yes: bool) -> None:
     click.echo(f"  {click.style('✓', fg='green')} deleted {db_path}")
 
 
-def _resolve_agents(root: Path, agent_flags: tuple[str, ...], yes: bool) -> list[str]:
-    """Decide which agents to configure: explicit flags > interactive > detected."""
+def _resolve_agents(
+    root: Path, agent_flags: tuple[str, ...], yes: bool
+) -> list[str]:
+    """
+    Decide which agents to configure.
+
+    Order: explicit flags > interactive > detected.
+    """
     if agent_flags:
         return list(dict.fromkeys(agent_flags))  # dedupe, preserve order
 
@@ -340,7 +409,11 @@ def _resolve_agents(root: Path, agent_flags: tuple[str, ...], yes: bool) -> list
     if not yes and _is_interactive():
         return _select_agents_interactive(root, detected)
 
-    click.echo("  Auto-selected: " + ", ".join(detected) + " (use --agent to override)")
+    click.echo(
+        "  Auto-selected: "
+        + ", ".join(detected)
+        + " (use --agent to override)"
+    )
     return detected
 
 
@@ -352,7 +425,8 @@ def _select_agents_interactive(root: Path, preselect: list[str]) -> list[str]:
 
     choices = [
         questionary.Choice(
-            title=f"{spec.label}  [{'detected' if spec.detect(root) else spec.scope}]",
+            title=f"{spec.label}  "
+            f"[{'detected' if spec.detect(root) else spec.scope}]",
             value=name,
             checked=name in preselect,
         )
@@ -365,7 +439,9 @@ def _select_agents_interactive(root: Path, preselect: list[str]) -> list[str]:
     return answer if answer is not None else []
 
 
-def _configure_agents(selected: list[str], root: Path, db_path: Path, no_skills: bool) -> None:
+def _configure_agents(
+    selected: list[str], root: Path, db_path: Path, no_skills: bool
+) -> None:
     if not selected:
         click.echo("  No agents configured.")
         return

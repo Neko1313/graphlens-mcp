@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from graphlens import GraphLens, Node, NodeKind, Relation, RelationKind, make_node_id
+from graphlens import (
+    GraphLens,
+    Node,
+    NodeKind,
+    Relation,
+    RelationKind,
+    make_node_id,
+)
 
 from graphlens_mcp.store.sqlite_store import SqliteStore
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
 
 PROJECT = "test"
 
@@ -64,5 +74,7 @@ def py_project(tmp_path: Path) -> Path:
     (pkg / "a.py").write_text(
         "def helper(x):\n    return x + 1\n\n\ndef main():\n    return helper(41)\n"
     )
-    (pkg / "b.py").write_text("from pkg.a import helper\n\n\ndef use():\n    return helper(1)\n")
+    (pkg / "b.py").write_text(
+        "from pkg.a import helper\n\n\ndef use():\n    return helper(1)\n"
+    )
     return tmp_path

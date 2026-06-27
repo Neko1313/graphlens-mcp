@@ -1,9 +1,11 @@
-"""The set of supported coding agents.
+"""
+The set of supported coding agents.
 
 Only agents whose MCP config format and location are known are included, so we
 never write a config an agent cannot read. Adding another agent is a single
-:class:`AgentSpec` entry. Codex uses TOML (``~/.codex/config.toml``); the rest use
-JSON. Zed and Cline use distinct schemas/locations and are not registered yet.
+:class:`AgentSpec` entry. Codex uses TOML (``~/.codex/config.toml``); the
+rest use JSON. Zed and Cline use distinct schemas/locations and are not
+registered yet.
 """
 
 from __future__ import annotations
@@ -13,7 +15,12 @@ from pathlib import Path
 
 from graphlens_mcp.agents.base import AgentSpec
 
-_SKILL_SRC = Path(__file__).parent.parent / "skills" / "graphlens-navigation" / "SKILL.md"
+_SKILL_SRC = (
+    Path(__file__).parent.parent
+    / "skills"
+    / "graphlens-navigation"
+    / "SKILL.md"
+)
 
 
 def _install_claude_skill(_project_root: Path) -> Path | None:
@@ -35,7 +42,9 @@ REGISTRY: dict[str, AgentSpec] = {
         stdio_type=False,
         path_fn=lambda r: r / ".mcp.json",
         detect_fn=lambda r: (
-            (r / ".claude").is_dir() or (r / ".mcp.json").exists() or (r / "CLAUDE.md").exists()
+            (r / ".claude").is_dir()
+            or (r / ".mcp.json").exists()
+            or (r / "CLAUDE.md").exists()
         ),
         install_skill=_install_claude_skill,
     ),
@@ -54,7 +63,9 @@ REGISTRY: dict[str, AgentSpec] = {
         scope="global",
         servers_key="mcpServers",
         stdio_type=False,
-        path_fn=lambda _r: Path.home() / ".codeium" / "windsurf" / "mcp_config.json",
+        path_fn=lambda _r: (
+            Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
+        ),
         detect_fn=lambda _r: (Path.home() / ".codeium" / "windsurf").is_dir(),
     ),
     "vscode": AgentSpec(

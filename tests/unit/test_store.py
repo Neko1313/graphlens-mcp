@@ -42,7 +42,10 @@ async def test_search_symbols_finds_node_by_name(store):
 async def test_get_callees_follows_calls_up_to_depth(store):
     # Arrange: a -> b -> c
     a, b, c = (make_node(n, file_path=FILE) for n in ("m.a", "m.b", "m.c"))
-    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, c, RelationKind.CALLS)]
+    rels = [
+        make_relation(a, b, RelationKind.CALLS),
+        make_relation(b, c, RelationKind.CALLS),
+    ]
     await _apply(store, [a, b, c], rels)
     # Act
     deep = {n["name"] for n in await store.get_callees(a.id, max_depth=3)}
@@ -55,7 +58,10 @@ async def test_get_callees_follows_calls_up_to_depth(store):
 async def test_get_callers_is_the_mirror_of_callees(store):
     # Arrange: a -> b -> c
     a, b, c = (make_node(n, file_path=FILE) for n in ("m.a", "m.b", "m.c"))
-    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, c, RelationKind.CALLS)]
+    rels = [
+        make_relation(a, b, RelationKind.CALLS),
+        make_relation(b, c, RelationKind.CALLS),
+    ]
     await _apply(store, [a, b, c], rels)
     # Act
     callers = {n["name"] for n in await store.get_callers(c.id, max_depth=3)}
@@ -66,7 +72,10 @@ async def test_get_callers_is_the_mirror_of_callees(store):
 async def test_call_graph_cte_is_cycle_safe(store):
     # Arrange: a -> b -> a (a cycle that must not loop forever)
     a, b = make_node("m.a", file_path=FILE), make_node("m.b", file_path=FILE)
-    rels = [make_relation(a, b, RelationKind.CALLS), make_relation(b, a, RelationKind.CALLS)]
+    rels = [
+        make_relation(a, b, RelationKind.CALLS),
+        make_relation(b, a, RelationKind.CALLS),
+    ]
     await _apply(store, [a, b], rels)
     # Act
     callees = {n["name"] for n in await store.get_callees(a.id, max_depth=10)}
@@ -76,7 +85,10 @@ async def test_call_graph_cte_is_cycle_safe(store):
 
 async def test_reindexing_a_file_replaces_its_nodes(store):
     # Arrange: first index has two functions
-    old = [make_node("m.gone", file_path=FILE), make_node("m.kept", file_path=FILE)]
+    old = [
+        make_node("m.gone", file_path=FILE),
+        make_node("m.kept", file_path=FILE),
+    ]
     await _apply(store, old, [])
     # Act: re-index the same file with only one function
     await _apply(store, [make_node("m.kept", file_path=FILE)], [])
@@ -104,7 +116,13 @@ async def test_reindex_preserves_synthesized_cross_language_edges(store):
     handler = make_node("svc.handler", file_path=FILE)
     await _apply(store, [handler], [])
     await store.apply_cross_language_edges(
-        [(handler.id, "other-service-node", RelationKind.COMMUNICATES_WITH.value)]
+        [
+            (
+                handler.id,
+                "other-service-node",
+                RelationKind.COMMUNICATES_WITH.value,
+            )
+        ]
     )
     # Act: re-index the same file (incremental) — single-file analysis never re-emits it
     await _apply(store, [handler], [])
@@ -116,17 +134,144 @@ async def test_reindex_preserves_synthesized_cross_language_edges(store):
     assert surviving == 1
 
 
+async def test_apply_patch_persists_only_file_owned_nodes(store):
+    # Arrange: a graph for FILE that also carries a foreign edge-target node (as
+    # subgraph_for_file / single-file analyze surface). Only the owned node is ours.
+    owned = make_node("m.local", file_path=FILE)
+    foreign = make_node("other.remote", file_path="/proj/other.py")
+    rels = [make_relation(owned, foreign, RelationKind.CALLS)]
+    # Act: patch FILE with a graph containing both nodes
+    await _apply(store, [owned, foreign], rels)
+    # Assert: the foreign node is NOT written by this file's patch (its own file owns it)
+    assert await store.get_node(owned.id) is not None
+    assert await store.get_node(foreign.id) is None
+    # the edge is still recorded; its dangling target is filtered at read time
+    assert await store.edge_count() == 1
+
+
+async def test_failed_write_rolls_back_and_leaves_no_partial_state(store):
+    # Arrange: a clean store
+    assert await store.node_count() == 0
+    # Act: a write that inserts a node then raises before commit must roll back
+    boom = make_node("m.boom", file_path=FILE)
+
+    async def _failing_write() -> None:
+        async with store._writing():
+            await store._conn.execute(
+                "INSERT INTO nodes(id, kind, qualified_name, name) VALUES(?, ?, ?, ?)",
+                (boom.id, "function", boom.qualified_name, boom.name),
+            )
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _failing_write()
+    # Assert: nothing persisted — the partial insert was rolled back, not committed
+    assert await store.node_count() == 0
+
+
+async def test_worst_status_for_files_reports_least_complete(store):
+    # Arrange: two files indexed at different graph qualities
+    await store.apply_patch(
+        graph_of([make_node("a.x", file_path="/a.py")], []),
+        "/a.py",
+        "h",
+        1.0,
+        1,
+        "ok",
+        "python",
+    )
+    await store.apply_patch(
+        graph_of([make_node("b.y", file_path="/b.py")], []),
+        "/b.py",
+        "h",
+        1.0,
+        1,
+        "degraded",
+        "python",
+    )
+    # Act / Assert: the aggregate is the least-complete of the two
+    assert (
+        await store.get_worst_status_for_files(["/a.py", "/b.py"])
+        == "degraded"
+    )
+    assert await store.get_worst_status_for_files(["/a.py"]) == "ok"
+
+
+async def test_imported_paths_round_trip(store):
+    # Arrange: an IMPORTS edge from b.py into a.py records a dep
+    helper = make_node("a.helper", file_path="/a.py")
+    importer = make_node("b.use", file_path="/b.py")
+    await store.apply_patch(
+        graph_of([helper], []), "/a.py", "h", 1.0, 1, "ok", "python"
+    )
+    await store.apply_patch(
+        graph_of(
+            [importer, helper],
+            [make_relation(importer, helper, RelationKind.IMPORTS)],
+        ),
+        "/b.py",
+        "h",
+        1.0,
+        1,
+        "ok",
+        "python",
+    )
+    # Act / Assert
+    assert await store.get_imported_paths("/b.py") == ["/a.py"]
+
+
+async def test_imported_files_escapes_underscore_in_module_name(store):
+    # b imports the fileless MODULE node `pkg.sub_mod`. A sibling file whose
+    # module is `pkg.subXmod` must NOT match — the '_' is a literal, not a LIKE
+    # single-char wildcard.
+    use = make_node("b.use", file_path="/b.py")
+    mod = make_node("pkg.sub_mod", kind=NodeKind.MODULE, file_path=None)
+    real = make_node("pkg.sub_mod.helper", file_path="/sub_mod.py")
+    sibling = make_node("pkg.subXmod.foo", file_path="/subXmod.py")
+    await store.apply_patch(
+        graph_of([real], []), "/sub_mod.py", "h", 1.0, 1, "ok", "python"
+    )
+    await store.apply_patch(
+        graph_of([sibling], []), "/subXmod.py", "h", 1.0, 1, "ok", "python"
+    )
+    await store.apply_patch(
+        graph_of([use], [make_relation(use, mod, RelationKind.IMPORTS)]),
+        "/b.py",
+        "h",
+        1.0,
+        1,
+        "ok",
+        "python",
+    )
+    await store.apply_structural(graph_of([mod], []))
+    # Act
+    deps = set(await store.get_imported_files("/b.py"))
+    importers = set(await store.get_importer_files("/sub_mod.py"))
+    # Assert: only the real module file matches, not the `_`-wildcard sibling
+    assert deps == {"/sub_mod.py"}
+    assert "/subXmod.py" not in deps
+    assert importers == {"/b.py"}
+
+
 async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
     # Arrange: exposer (server) and consumer (client) meet at one HTTP boundary
     server = make_node("svc.get_user", file_path="/svc.py")
     client = make_node("web.fetch_user", file_path="/svc.py")
-    boundary = make_node("http:GET /users/{}", kind=NodeKind.BOUNDARY, file_path=None)
+    boundary = make_node(
+        "http:GET /users/{}", kind=NodeKind.BOUNDARY, file_path=None
+    )
     rels = [
         make_relation(server, boundary, RelationKind.EXPOSES),
         make_relation(client, boundary, RelationKind.CONSUMES),
     ]
+    # File-owned nodes + their EXPOSES/CONSUMES edges go through apply_patch; the
+    # fileless boundary node is persisted by apply_structural (as the full index does).
     await _apply(store, [server, client, boundary], rels, file_path="/svc.py")
+    await store.apply_structural(graph_of([server, client, boundary], rels))
     # Act
-    linked = {n["name"] for n in await store.get_cross_language_calls(server.id)}
+    linked = {
+        n["name"] for n in await store.get_cross_language_calls(server.id)
+    }
     # Assert
     assert "fetch_user" in linked

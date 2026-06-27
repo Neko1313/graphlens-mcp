@@ -5,6 +5,11 @@
 .claude/
 .idea/
 
+# Docs site (Docusaurus, under website/)
+node_modules/
+website/build/
+website/.docusaurus/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

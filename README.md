@@ -1,14 +1,22 @@
 # graphlens-mcp
 
+[![CI](https://github.com/Neko1313/graphlens-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Neko1313/graphlens-mcp/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-github%20pages-blue)](https://neko1313.github.io/graphlens-mcp/)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.13-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 A free, MIT-licensed [MCP](https://modelcontextprotocol.io) server that gives coding
 agents (Claude Code, Cursor, and compatible clients) a **semantic code graph** of your
 project — symbols, cross-file calls, references, imports and cross-language boundaries.
 
 Instead of reading files top-to-bottom or grepping for names, the agent **navigates the
 structure**: *who calls this function*, *what does it depend on*, *what breaks if I change
-its signature*. It is a thin runtime layer over the [`graphlens`](https://pypi.org/project/graphlens/)
-analysis engine: `graphlens` provides the mechanisms (parsing, stable node identity,
-resolvers); `graphlens-mcp` owns the storage, freshness and the agent-facing surface.
+its signature*. It is a thin runtime layer over the
+[`graphlens`](https://github.com/Neko1313/graphlens) analysis engine: `graphlens` provides
+the mechanisms (parsing, stable node identity, resolvers); `graphlens-mcp` owns the storage,
+freshness and the agent-facing surface.
+
+📖 **Documentation:** <https://neko1313.github.io/graphlens-mcp/>
 
 > Status: early. The core navigation works; see [Known limitations](#known-limitations).
 
@@ -29,8 +37,9 @@ uv tool install graphlens-mcp      # or: pipx install graphlens-mcp
 ```
 
 Python language analysis works out of the box (the `ty` type engine ships as a
-dependency). Other languages parse immediately at the **skeleton** level and unlock full
-semantics once their toolchain is present (Node for TypeScript, the Go toolchain, etc.).
+dependency). Other languages parse immediately and unlock full cross-file semantics once
+their toolchain is present (Node for TypeScript, the Go toolchain, etc.); without it that
+language is reported as `degraded` rather than blocking `init`.
 
 ## Quickstart (two commands)
 
@@ -52,6 +61,7 @@ it something like *"what breaks if I change the signature of `create_order`?"*.
 | `graphlens-mcp serve` | Start the MCP server over stdio. **Launched by the agent**, not by you |
 | `graphlens-mcp status` | Show detected languages, toolchain status, and graph size/freshness |
 | `graphlens-mcp reindex` | Force a full rebuild (e.g. after installing a new toolchain) |
+| `graphlens-mcp remove` | Deregister from agents and (with `--purge-db`) delete the local graph |
 
 Useful `init` flags: `--root <dir>`, `--agent claude_code --agent cursor` (repeatable),
 `--no-agent`, `--no-skills`, `--db <path>`.
@@ -65,19 +75,19 @@ safe to delete; `reindex` rebuilds it. Add `.graphlens/` to your VCS ignore (the
 | Language | Engine | Out-of-box |
 |---|---|---|
 | Python | `ty` (bundled) | Full semantics immediately |
-| TypeScript | Node bridge | Skeleton without Node; full semantics with Node installed |
-| Go | Go toolchain | Skeleton without toolchain |
-| Rust | SCIP / rust-analyzer | Skeleton without toolchain |
-| PHP | PHP parser | Skeleton without toolchain |
+| TypeScript | Node bridge | `degraded` without Node; full semantics with Node installed |
+| Go | Go toolchain | `degraded` without toolchain |
+| Rust | SCIP / rust-analyzer | `degraded` without toolchain |
+| PHP | PHP parser | `degraded` without toolchain |
 
 `graphlens-mcp status` reports the actual resolver status per language. When a toolchain is
-missing, that language degrades to a **skeleton** (structure only) with an install hint —
-it never blocks `init`.
+missing, that language is reported as **degraded** (parsed structure, calls/types not fully
+resolved) with an install hint — it never blocks `init`.
 
 ## Agent tools
 
-Each response carries a graph-quality status (`ok` | `degraded` | `skeleton`) so the agent
-never mistakes a partial answer for a complete one.
+Each response carries a graph-quality status (`ok` | `degraded`) so the agent never mistakes
+a partial answer for a complete one.
 
 | Tool | Purpose |
 |---|---|
@@ -92,22 +102,44 @@ never mistakes a partial answer for a complete one.
 
 ## Freshness model
 
-The graph is kept current on access. Before answering a query about a file, the server
-compares the file's `mtime`/`size` (confirmed by content hash) against the store; if it
-changed, the file is re-indexed in two phases — an instant **skeleton** (structure) and, on
-demand for semantic queries, **full semantics** (resolved calls/types). Deleting a file on
-disk prunes its symbols from the graph on the next access.
+A single mechanism keeps the graph current: a **filesystem watcher** (`serve` starts it by
+default; disable with `--no-watch`). When a file changes on disk the server re-indexes the
+**connected set** — the changed file plus the files that import it and the files it imports —
+with one full analyze, so cross-file edges are rebuilt correctly rather than left partial.
+Deleting a file prunes its symbols and refreshes its importers. There is no polling and no
+structure-only "skeleton" phase: every (re)index produces the full graph the resolver can
+give. As a backstop, a tool that touches a file the watcher hasn't processed yet triggers the
+same connected re-index on access.
+
+Files created, deleted or edited *while the server was down* are invisible to an event-based
+watcher, so `serve` runs a one-shot **reconcile** at startup: it scans the project, indexes
+new files, prunes vanished ones, and refreshes any that changed — then hands off to the
+watcher.
 
 ## Known limitations
 
-- **Transitive freshness:** if file `B` changes, the semantics of a file `A` that imports it
-  may reflect `B`'s old signature until `A` is queried again. Transitive invalidation is
-  planned.
+- **Whole-project re-link:** the watcher re-links the *connected set* of a change, not the
+  entire project. A rename that ripples through many indirection layers — or creating a file
+  that an *unchanged* file already imports — may need a full `reindex` for an exact graph.
 - **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
   rebuilt on a full `reindex`; they can erode across incremental edits (the boundary-based
   query still resolves connections). Run `reindex` for an exact cross-language view.
-- **No `remove`/`clean` command yet:** to fully detach, delete `.graphlens/` and remove the
-  `graphlens` entry from your agent's MCP config by hand.
+
+## Uninstall
+
+`graphlens-mcp remove` deregisters the server from your agents; add `--purge-db` to also
+delete the local `.graphlens/` cache.
+
+## Development
+
+```bash
+uv sync --all-groups   # install lint + test tooling
+task check             # ruff + format-check + ty + bandit + pytest (the CI gate)
+task docs:serve        # preview the docs site locally (needs Node + pnpm)
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and invariants, or the
+[documentation site](https://neko1313.github.io/graphlens-mcp/) for the full guide.
 
 ## License
 

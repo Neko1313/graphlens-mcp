@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS files (
   hash       TEXT NOT NULL,
   mtime      REAL NOT NULL,
   size       INTEGER NOT NULL,
-  status     TEXT NOT NULL CHECK(status IN ('skeleton', 'ok', 'degraded')),
+  status     TEXT NOT NULL CHECK(status IN ('ok', 'degraded')),
   language   TEXT
 );
 
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS deps (
 CREATE INDEX IF NOT EXISTS idx_edges_src  ON edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_tgt  ON edges(target_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
+CREATE INDEX IF NOT EXISTS idx_nodes_qname ON nodes(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_deps_imported ON deps(imported_path);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(

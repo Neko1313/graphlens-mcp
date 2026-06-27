@@ -50,12 +50,16 @@ async def test_configure_vscode_uses_servers_key_with_stdio_type(tmp_path):
     assert cfg["servers"]["graphlens"]["type"] == "stdio"
 
 
-async def test_configure_codex_writes_toml_and_preserves_settings(tmp_path, monkeypatch):
+async def test_configure_codex_writes_toml_and_preserves_settings(
+    tmp_path, monkeypatch
+):
     # Arrange: Codex config is global (~/.codex/config.toml) with existing settings
     monkeypatch.setenv("HOME", str(tmp_path))
     codex_dir = tmp_path / ".codex"
     codex_dir.mkdir()
-    (codex_dir / "config.toml").write_text('model = "o3"\n\n[mcp_servers.other]\ncommand = "foo"\n')
+    (codex_dir / "config.toml").write_text(
+        'model = "o3"\n\n[mcp_servers.other]\ncommand = "foo"\n'
+    )
     # Act
     path = configure(REGISTRY["codex"], tmp_path, DB)
     # Assert
@@ -79,6 +83,8 @@ async def test_deregister_removes_only_our_entry(tmp_path):
 
 async def test_deregister_returns_false_when_absent(tmp_path):
     # Arrange: a config with no graphlens entry
-    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {"other": {"command": "foo"}}}))
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"other": {"command": "foo"}}})
+    )
     # Act / Assert
     assert deregister(REGISTRY["claude_code"], tmp_path) is False
