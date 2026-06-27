@@ -10,6 +10,17 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 from graphlens_mcp.indexer.workspace import Workspace
+
+# Runtime import (NOT under TYPE_CHECKING): with `from __future__ import
+# annotations` every annotation is a string, and FastMCP evaluates each tool's
+# return annotation at registration time to build its output schema. Under
+# TYPE_CHECKING that eval raises NameError and the server fails to start, so
+# the agent reports it "cannot connect". noqa: TC001 stops ruff re-hiding it.
+from graphlens_mcp.server.models import (  # noqa: TC001
+    FileStructureResult,
+    GraphResult,
+    NodeInfoResult,
+)
 from graphlens_mcp.server.tools import (
     tool_find_references,
     tool_get_callees,
@@ -24,11 +35,6 @@ from graphlens_mcp.server.tools import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from graphlens_mcp.server.models import (
-        FileStructureResult,
-        GraphResult,
-        NodeInfoResult,
-    )
     from graphlens_mcp.store.sqlite_store import SqliteStore
 
 logger = logging.getLogger(__name__)
