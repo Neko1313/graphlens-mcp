@@ -185,6 +185,31 @@ async def test_watcher_reindexes_edited_file(py_project: Path, monkeypatch):
         await ws.close()
 
 
+async def test_watcher_prunes_deleted_file(py_project: Path, monkeypatch):
+    # The watcher must also react to deletions: a file removed on disk has its
+    # nodes pruned from the graph (Change.deleted -> reindex_connected -> prune).
+    monkeypatch.setenv("WATCHFILES_FORCE_POLLING", "true")
+    ws = await _indexed(py_project)
+    try:
+        a_py = py_project / "pkg" / "a.py"
+        a_abs = str(a_py.resolve())
+        assert await ws.store.get_nodes_in_file(a_abs)
+
+        ws.start_watching()
+        await asyncio.sleep(1.0)  # let the watcher establish its baseline
+        a_py.unlink()
+
+        nodes: list = [1]
+        for _ in range(75):  # ~15s budget
+            await asyncio.sleep(0.2)
+            nodes = await ws.store.get_nodes_in_file(a_abs)
+            if nodes == []:
+                break
+        assert nodes == []
+    finally:
+        await ws.close()
+
+
 async def test_close_is_idempotent(py_project: Path):
     ws = await _indexed(py_project)
     await ws.close()
