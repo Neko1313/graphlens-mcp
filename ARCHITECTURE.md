@@ -67,8 +67,9 @@ new/deleted/edited paths through `reindex_connected`. A wholesale rebuild remain
    such edges); unresolved targets are filtered at read time instead.
 7. **Cycle-safe traversal.** `get_callees/callers/neighbors` use recursive CTEs with a
    visited-path guard, so cyclic call graphs terminate without exponential blow-up.
-8. **Hash-versioned semantic patches.** A semantic re-index re-checks the file hash before
-   applying; a result computed against stale content is discarded.
+8. **Atomic, rolled-back writes.** Every write runs under `SqliteStore._writing` — the
+   single-writer lock plus commit-on-success / rollback-on-error — so a failed multi-statement
+   patch can never leave a partial transaction for the next writer.
 9. **Resolver off the hot path.** One adapter (and resolver) is pooled per language for the
    `Workspace` lifetime; `Workspace.close()` shuts down resolver/LSP processes. Queries are
    served from SQLite, never by invoking a resolver synchronously.
@@ -76,10 +77,10 @@ new/deleted/edited paths through `reindex_connected`. A wholesale rebuild remain
 ## Storage
 
 SQLite with `nodes`, `edges`, `deps`, `files`, `meta` and an FTS5 index over symbol names.
-A single aiosqlite connection serializes all operations; every write is additionally
-guarded by a write lock so multi-statement patches are atomic. WAL is enabled for
-crash-safety. (A dedicated reader connection is a possible future optimization; for a
-single-user local server the serialized model is simpler and write bursts are short.)
+A dedicated **writer** connection serializes all writes behind a write lock (so
+multi-statement patches are atomic), while a separate read-only connection serves queries
+from the last committed WAL snapshot without queuing behind an in-flight write. WAL is
+enabled for crash-safety and reader/writer concurrency.
 
 ## Cache, not system of record
 
