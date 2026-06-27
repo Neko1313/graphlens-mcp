@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from graphlens_mcp.indexer.workspace import Workspace, default_db_path
+from graphlens_mcp.server.mcp_server import create_mcp
 from graphlens_mcp.server.tools import (
     tool_get_callers,
     tool_get_file_structure,
@@ -59,6 +60,38 @@ async def test_file_structure_accepts_a_project_relative_path(
         result = await tool_get_file_structure(ws.store, ws, "pkg/a.py")
         assert result.error is None
         assert any(n.name == "helper" for n in result.nodes)
+    finally:
+        await ws.close()
+
+
+async def test_create_mcp_registers_all_tools_with_output_schemas(
+    py_project: Path,
+):
+    # Regression: with `from __future__ import annotations`, FastMCP evaluates
+    # each tool's return annotation at registration time to build its output
+    # schema. If the response models are imported only under TYPE_CHECKING, that
+    # eval raises NameError here and the server never starts — the client then
+    # reports it "cannot connect". Building create_mcp must succeed and expose
+    # every tool with a non-trivial schema.
+    ws = await _workspace(py_project)
+    try:
+        mcp = create_mcp(ws.store, ws)
+        tools = await mcp.list_tools()
+        names = {t.name for t in tools}
+        assert names == {
+            "search_symbols",
+            "get_node_info",
+            "get_file_structure",
+            "get_callees",
+            "get_callers",
+            "get_neighbors",
+            "find_references",
+            "get_cross_language_calls",
+        }
+        # The output schema is what eval-of-annotation produces; it must exist
+        # and describe the typed envelope rather than being absent/empty.
+        search = next(t for t in tools if t.name == "search_symbols")
+        assert search.output_schema
     finally:
         await ws.close()
 
