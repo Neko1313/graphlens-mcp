@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-06-27
+### Bug Fixes
+
+- **server**: fix(server): start the MCP server so Claude Code can connect by @Neko1313 in [#2](https://github.com/Neko1313/graphlens-mcp/pull/2)
+
+
+
+
+**Full Changelog**: https://github.com/Neko1313/graphlens-mcp/compare/v0.1.0...v0.1.1
 ## [0.1.0] - 2026-06-27
 ### Features
 
@@ -17,6 +26,7 @@ All notable changes to this project will be documented in this file.
 
 ### New Contributors
 
+- @github-actions[bot] made their first contribution
 - @Neko1313 made their first contribution in [#1](https://github.com/Neko1313/graphlens-mcp/pull/1)
 - @ made their first contribution
 
