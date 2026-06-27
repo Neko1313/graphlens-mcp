@@ -41,6 +41,16 @@ analyze, so a file is `ok` or (toolchain missing) `degraded`.
 before the watcher has processed it runs the same `reindex_connected` (deduped through
 `InFlightRegistry`).
 
+**Monorepo / workspace routing.** A repo can hold several independent packages of one
+language (a uv / pnpm / cargo workspace). The full index lets each adapter discover those
+per-package roots and keys every node id off the *package* name and its package-relative
+module path. Incremental re-index must use the same roots, so `reindex_connected` groups
+each changed file under its owning package root (`find_language_roots` →
+`_nearest_root`) and analyzes per group. Passing the repo root with `files=` instead would
+collapse the whole workspace into one project, re-keying a member's symbols under the wrong
+name and breaking every cross-file edge into them. A plain single-package repo is one group
+(the project root) and behaves exactly as before.
+
 Because an event-based watcher cannot see changes made while it was not running, `serve`
 calls `Workspace.reconcile` once at startup: it walks the project (`_discover_source_files`,
 excluding `.graphlens`/VCS/build dirs), diffs disk against the `files` table, and feeds the
