@@ -65,6 +65,28 @@ tasks:
       - task: test
 
   # ---------------------------------------------------------------------------
+  # Docs site (Docusaurus, under website/; needs Node + pnpm)
+  # ---------------------------------------------------------------------------
+
+  docs:install:
+    desc: Install the docs site dependencies
+    dir: website
+    cmds:
+      - pnpm install --frozen-lockfile
+
+  docs:serve:
+    desc: Preview the docs site locally with hot reload
+    dir: website
+    cmds:
+      - pnpm start
+
+  docs:build:
+    desc: Build the static docs site
+    dir: website
+    cmds:
+      - pnpm build
+
+  # ---------------------------------------------------------------------------
   # Release (ported from the graphlens engine; single-package). Driven by the
   # Release workflow; conventional commits decide the next version via git-cliff.
   # ---------------------------------------------------------------------------

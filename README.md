@@ -1,14 +1,22 @@
 # graphlens-mcp
 
+[![CI](https://github.com/Neko1313/graphlens-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Neko1313/graphlens-mcp/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-github%20pages-blue)](https://neko1313.github.io/graphlens-mcp/)
+[![Python](https://img.shields.io/badge/python-%E2%89%A53.13-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 A free, MIT-licensed [MCP](https://modelcontextprotocol.io) server that gives coding
 agents (Claude Code, Cursor, and compatible clients) a **semantic code graph** of your
 project — symbols, cross-file calls, references, imports and cross-language boundaries.
 
 Instead of reading files top-to-bottom or grepping for names, the agent **navigates the
 structure**: *who calls this function*, *what does it depend on*, *what breaks if I change
-its signature*. It is a thin runtime layer over the [`graphlens`](https://pypi.org/project/graphlens/)
-analysis engine: `graphlens` provides the mechanisms (parsing, stable node identity,
-resolvers); `graphlens-mcp` owns the storage, freshness and the agent-facing surface.
+its signature*. It is a thin runtime layer over the
+[`graphlens`](https://github.com/Neko1313/graphlens) analysis engine: `graphlens` provides
+the mechanisms (parsing, stable node identity, resolvers); `graphlens-mcp` owns the storage,
+freshness and the agent-facing surface.
+
+📖 **Documentation:** <https://neko1313.github.io/graphlens-mcp/>
 
 > Status: early. The core navigation works; see [Known limitations](#known-limitations).
 
@@ -116,8 +124,22 @@ watcher.
 - **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
   rebuilt on a full `reindex`; they can erode across incremental edits (the boundary-based
   query still resolves connections). Run `reindex` for an exact cross-language view.
-- **Detaching:** `graphlens-mcp remove` deregisters the server from your agents; add
-  `--purge-db` to also delete the local `.graphlens/` cache.
+
+## Uninstall
+
+`graphlens-mcp remove` deregisters the server from your agents; add `--purge-db` to also
+delete the local `.graphlens/` cache.
+
+## Development
+
+```bash
+uv sync --all-groups   # install lint + test tooling
+task check             # ruff + format-check + ty + bandit + pytest (the CI gate)
+task docs:serve        # preview the docs site locally (needs Node + pnpm)
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and invariants, or the
+[documentation site](https://neko1313.github.io/graphlens-mcp/) for the full guide.
 
 ## License
 
