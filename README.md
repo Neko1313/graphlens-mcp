@@ -29,8 +29,9 @@ uv tool install graphlens-mcp      # or: pipx install graphlens-mcp
 ```
 
 Python language analysis works out of the box (the `ty` type engine ships as a
-dependency). Other languages parse immediately at the **skeleton** level and unlock full
-semantics once their toolchain is present (Node for TypeScript, the Go toolchain, etc.).
+dependency). Other languages parse immediately and unlock full cross-file semantics once
+their toolchain is present (Node for TypeScript, the Go toolchain, etc.); without it that
+language is reported as `degraded` rather than blocking `init`.
 
 ## Quickstart (two commands)
 
@@ -66,19 +67,19 @@ safe to delete; `reindex` rebuilds it. Add `.graphlens/` to your VCS ignore (the
 | Language | Engine | Out-of-box |
 |---|---|---|
 | Python | `ty` (bundled) | Full semantics immediately |
-| TypeScript | Node bridge | Skeleton without Node; full semantics with Node installed |
-| Go | Go toolchain | Skeleton without toolchain |
-| Rust | SCIP / rust-analyzer | Skeleton without toolchain |
-| PHP | PHP parser | Skeleton without toolchain |
+| TypeScript | Node bridge | `degraded` without Node; full semantics with Node installed |
+| Go | Go toolchain | `degraded` without toolchain |
+| Rust | SCIP / rust-analyzer | `degraded` without toolchain |
+| PHP | PHP parser | `degraded` without toolchain |
 
 `graphlens-mcp status` reports the actual resolver status per language. When a toolchain is
-missing, that language degrades to a **skeleton** (structure only) with an install hint —
-it never blocks `init`.
+missing, that language is reported as **degraded** (parsed structure, calls/types not fully
+resolved) with an install hint — it never blocks `init`.
 
 ## Agent tools
 
-Each response carries a graph-quality status (`ok` | `degraded` | `skeleton`) so the agent
-never mistakes a partial answer for a complete one.
+Each response carries a graph-quality status (`ok` | `degraded`) so the agent never mistakes
+a partial answer for a complete one.
 
 | Tool | Purpose |
 |---|---|
@@ -93,24 +94,20 @@ never mistakes a partial answer for a complete one.
 
 ## Freshness model
 
-The graph is kept current on access. Before answering a query about a file, the server
-compares the file's `mtime`/`size` (confirmed by content hash) against the store; if it
-changed, the file is re-indexed in two phases — an instant **skeleton** (structure) and, on
-demand for semantic queries, **full semantics** (resolved calls/types). Deleting a file on
-disk prunes its symbols from the graph on the next access.
-
-In addition, `serve` runs a **background sweep** (every `--watch-interval` seconds, default
-15) that re-indexes any already-tracked file edited on disk *even if no tool queries it*, so
-the graph self-heals when you edit files the agent hasn't asked about. Disable it with
-`graphlens-mcp serve --no-watch`.
+A single mechanism keeps the graph current: a **filesystem watcher** (`serve` starts it by
+default; disable with `--no-watch`). When a file changes on disk the server re-indexes the
+**connected set** — the changed file plus the files that import it and the files it imports —
+with one full analyze, so cross-file edges are rebuilt correctly rather than left partial.
+Deleting a file prunes its symbols and refreshes its importers. There is no polling and no
+structure-only "skeleton" phase: every (re)index produces the full graph the resolver can
+give. As a backstop, a tool that touches a file the watcher hasn't processed yet triggers the
+same connected re-index on access.
 
 ## Known limitations
 
-- **Transitive freshness:** if file `B` changes, the semantics of a file `A` that imports it
-  can reflect `B`'s old signature until a full `reindex`. A semantic query on `A` now
-  **detects** this (it checks whether `A`'s recorded dependencies changed on disk) and
-  reports `resolver_status: degraded` instead of a false `ok` — single-file analysis cannot
-  re-resolve a cross-file call on its own. Run `reindex` for exact cross-file edges.
+- **Whole-project re-link:** the watcher re-links the *connected set* of a change, not the
+  entire project. A rename that ripples through many indirection layers may need a full
+  `reindex` for an exact graph.
 - **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
   rebuilt on a full `reindex`; they can erode across incremental edits (the boundary-based
   query still resolves connections). Run `reindex` for an exact cross-language view.

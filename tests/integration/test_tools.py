@@ -28,7 +28,7 @@ async def test_search_returns_typed_result_with_status(py_project: Path):
         result = await tool_search_symbols(ws.store, "helper")
         assert result.error is None
         assert any(n.name == "helper" for n in result.nodes)
-        assert result.resolver_status in {"ok", "degraded", "skeleton"}
+        assert result.resolver_status in {"ok", "degraded"}
     finally:
         await ws.close()
 

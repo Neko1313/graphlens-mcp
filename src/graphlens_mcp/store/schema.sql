@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS files (
   hash       TEXT NOT NULL,
   mtime      REAL NOT NULL,
   size       INTEGER NOT NULL,
-  status     TEXT NOT NULL CHECK(status IN ('skeleton', 'ok', 'degraded')),
+  status     TEXT NOT NULL CHECK(status IN ('ok', 'degraded')),
   language   TEXT
 );
 

@@ -25,18 +25,22 @@ src/graphlens_mcp/
 - **`reindex`** — clear and rebuild the whole graph.
 - **`remove`** — deregister from agents and optionally delete the cache.
 
-## Freshness (on-access)
+## Freshness (watcher-driven)
 
-Before answering a query about a file, `Workspace.ensure_fresh` compares `mtime`/`size`
-(confirmed by content hash) to the store. Unchanged → serve from SQLite. Changed →
-re-index: phase 1 a **skeleton** (structure only, `NullResolver`), phase 2 **full
-semantics** on demand for semantic queries. Deleted on disk → the file's rows are pruned.
+A single mechanism keeps the graph current: a **filesystem watcher** (`watchfiles`),
+started by `serve` (`Workspace.start_watching`) unless `--no-watch` is passed. On each
+change the watcher calls `Workspace.reindex_connected`, which re-indexes the **connected
+set** of every changed file — the file plus its importers (`get_importer_files`) and its
+imports (`get_imported_files`) — with one full `analyze(files=…)`. Analyzing the set
+together lets the resolver re-link calls *across* those files, so the affected region is a
+full graph, not a single-file approximation. Deletions prune the file and refresh its
+importers. There is **no** structure-only "skeleton" phase: every (re)index is a full
+analyze, so a file is `ok` or (toolchain missing) `degraded`.
 
-`serve` also runs a **background sweep** (`Workspace.start_background_refresh`) that, every
-`--watch-interval` seconds, re-runs `ensure_fresh` over every tracked file so an edit is
-picked up even when no tool queries that file. It reuses the same `InFlightRegistry`, so a
-sweep and an on-access index of the same file never run twice. New-file discovery (indexing
-files not yet tracked) is left to `reindex`.
+`Workspace.ensure_fresh` is the on-access backstop: a tool that touches a changed file
+before the watcher has processed it runs the same `reindex_connected` (deduped through
+`InFlightRegistry`). New-file discovery (indexing files not yet tracked) is left to
+`reindex`.
 
 ## Key invariants
 
@@ -84,16 +88,15 @@ pure overhead for a cache you can rebuild in seconds with `reindex`.
 ## Tool boundary
 
 Every MCP tool returns a typed Pydantic model (`server/models.py`). List responses carry
-`resolver_status` (`ok` | `degraded` | `skeleton`) and a `truncated` flag, results are
-capped (`MAX_RESULTS`), and input bounds (`limit`, `max_depth`) are validated by pydantic.
-File-touching tools run the freshness check first; relative paths resolve against the
-project root, not the server cwd.
+`resolver_status` (`ok` | `degraded`, aggregated across every returned node's file) and a
+`truncated` flag, results are capped (`MAX_RESULTS`), and input bounds (`limit`,
+`max_depth`) are validated by pydantic. File-touching tools run the freshness check first;
+relative paths resolve against the project root, not the server cwd.
 
 ## Known limitations
 
-- **Transitive freshness:** a file's semantics may reflect an imported file's old signature
-  until it is queried again (no transitive invalidation in v1).
-- **Cross-file resolution is whole-project:** single-file incremental analysis cannot
-  resolve a call into another file the way a full index does; the golden test scopes the
-  `batch == incremental` invariant to file-bearing nodes (and to full edge identity for a
-  self-contained file).
+- **Connected-set, not whole-project, re-link:** a change re-analyzes the changed file with
+  its direct importers and imports, so cross-file edges within that set are correct, but a
+  change that ripples through several indirection layers may need a full `reindex` for an
+  exact graph. The golden test scopes the `batch == incremental` invariant to file-bearing
+  nodes (and to full edge identity for a self-contained file).

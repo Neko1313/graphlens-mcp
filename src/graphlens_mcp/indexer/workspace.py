@@ -1,7 +1,13 @@
 """
 Workspace orchestration.
 
-Orchestrates indexing, freshness checks, and cross-language linking.
+Indexing, watcher-driven freshness, and cross-language linking. The graph is
+kept current by a single mechanism — a filesystem **watcher** (watchfiles).
+When a file changes the watcher re-indexes the *connected set* (the changed
+file plus the files that import it and the files it imports) with a full
+analyze, so cross-file edges are rebuilt correctly rather than left partial.
+There is no polling and no structure-only "skeleton" phase: every (re)index
+produces the full graph the resolver can give.
 """
 
 from __future__ import annotations
@@ -22,27 +28,25 @@ from graphlens import (
     ResolverStatus,
     adapter_registry,
 )
+from watchfiles import awatch
 
 from graphlens_mcp.indexer.concurrency import (
     MAX_CONCURRENT_RESOLVERS,
     InFlightRegistry,
 )
-from graphlens_mcp.indexer.resolvers import (
-    doctor,
-    get_adapter,
-    get_null_adapter,
-)
+from graphlens_mcp.indexer.resolvers import doctor, get_adapter
 from graphlens_mcp.store.sqlite_store import SqliteStore
 
 if TYPE_CHECKING:
     import os
+    from collections.abc import Iterable
 
 # Built lazily on first use from adapter.file_extensions()
 _EXT_TO_LANG: dict[str, str] | None = None
 
 
 def _get_ext_map() -> dict[str, str]:
-    global _EXT_TO_LANG  # noqa: PLW0603 — process-wide lazy cache of adapter extensions
+    global _EXT_TO_LANG  # noqa: PLW0603 — process-wide cache of adapter exts
     if _EXT_TO_LANG is None:
         mapping: dict[str, str] = {}
         for lang in adapter_registry.available():
@@ -66,9 +70,6 @@ _DB_NAME = "graph.db"
 # otherwise blow up quadratically).
 _MAX_BOUNDARY_FANOUT = 2000
 
-# Default cadence of the background freshness sweep (seconds).
-DEFAULT_WATCH_INTERVAL = 15.0
-
 
 def default_db_path(project_root: Path) -> Path:
     """Return the default graph database location for *project_root*."""
@@ -87,11 +88,9 @@ class Workspace:
         # One long-lived adapter per language for the Workspace lifetime,
         # so the expensive adapter/resolver init (TS install cache,
         # resolver objects) is reused across the full index and every
-        # incremental re-index, instead of being rebuilt on each call.
-        # (Invariant: resolver off the request hot path.)
+        # re-index. (Invariant: resolver off the request hot path.)
         self._adapters: dict[str, LanguageAdapter | None] = {}
-        self._null_adapters: dict[str, LanguageAdapter | None] = {}
-        self._refresh_task: asyncio.Task[None] | None = None
+        self._watch_task: asyncio.Task[None] | None = None
 
     @classmethod
     async def create(cls, project_root: Path, db_path: Path) -> Workspace:
@@ -105,87 +104,65 @@ class Workspace:
             self._adapters[lang] = get_adapter(lang)
         return self._adapters[lang]
 
-    def _null_adapter(self, lang: str) -> LanguageAdapter | None:
-        """Return the pooled skeleton (NullResolver) adapter for *lang*."""
-        if lang not in self._null_adapters:
-            self._null_adapters[lang] = get_null_adapter(lang)
-        return self._null_adapters[lang]
-
     # ------------------------------------------------------------------
-    # Background freshness sweep
+    # Filesystem watcher (the single freshness mechanism)
     # ------------------------------------------------------------------
 
-    def start_background_refresh(
-        self, interval: float = DEFAULT_WATCH_INTERVAL
-    ) -> None:
+    def start_watching(self) -> None:
         """
-        Launch a background task that re-indexes changed files on a timer.
+        Start the filesystem watcher that keeps the graph fresh.
 
-        On-access freshness only re-indexes a file when a tool queries it; if
-        the agent never touches an edited file its graph stays stale. This
-        sweep keeps every *already-tracked* file current without a query, so
-        the graph self-heals. Idempotent — a second call is a no-op.
+        Idempotent — a second call is a no-op. The watcher re-indexes the
+        connected set of every changed file, so the graph self-heals even
+        when the agent never queries the edited file.
         """
-        if self._refresh_task is not None:
+        if self._watch_task is not None:
             return
-        self._refresh_task = asyncio.create_task(self._refresh_loop(interval))
+        self._watch_task = asyncio.create_task(self._watch_loop())
 
-    async def stop_background_refresh(self) -> None:
-        """Cancel the background sweep task if it is running."""
-        task = self._refresh_task
-        self._refresh_task = None
+    async def stop_watching(self) -> None:
+        """Cancel the watcher task if it is running."""
+        task = self._watch_task
+        self._watch_task = None
         if task is None:
             return
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _refresh_loop(self, interval: float) -> None:
-        """Sweep tracked files every *interval* seconds until cancelled."""
-        while True:
-            await asyncio.sleep(interval)
+    async def _watch_loop(self) -> None:
+        """Re-index the connected set of every changed source file."""
+        exts = set(_get_ext_map())
+        async for changes in awatch(self.project_root):
+            paths: set[str] = set()
+            for _change, raw in changes:
+                p = Path(raw)
+                if _GRAPHLENS_DIR in p.parts or p.suffix not in exts:
+                    continue
+                paths.add(await _aresolve(p))
+            if not paths:
+                continue
             try:
-                await self._sweep_once()
+                await self.reindex_connected(paths)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Background refresh sweep failed: %s", exc)
-
-    async def _sweep_once(self) -> int:
-        """
-        Re-index every tracked file whose bytes changed; prune deletions.
-
-        Reuses :meth:`ensure_fresh` (so the InFlightRegistry dedupes against
-        concurrent on-access indexing) and preserves each file's prior
-        semantic level. Returns the number of files visited.
-        """
-        files = await self.store.list_files()
-        for row in files:
-            want_semantic = row["status"] == "ok"
-            try:
-                await self.ensure_fresh(
-                    Path(row["path"]), semantic=want_semantic
-                )
-            except Exception as exc:
-                logger.debug("Sweep skip %s: %s", row["path"], exc)
-        return len(files)
+                logger.warning("Watch re-index failed: %s", exc)
 
     async def close(self) -> None:
         """
-        Shut down pooled resolvers (e.g. ty LSP processes) and the store.
+        Stop the watcher, shut down pooled resolvers, and close the store.
 
-        Best-effort: prefer a public ``close``/``shutdown``/``stop`` on the
-        adapter itself; fall back to its private ``_resolver`` only when the
-        adapter exposes no public lifecycle hook. Idempotent — safe to call
-        more than once.
+        Best-effort resolver shutdown: prefer a public
+        ``close``/``shutdown``/``stop`` on the adapter, falling back to its
+        private ``_resolver``. Idempotent — safe to call more than once.
         """
-        await self.stop_background_refresh()
+        await self.stop_watching()
         for adapter in self._adapters.values():
             if adapter is None:
                 continue
             self._shutdown_one(adapter)
         self._adapters.clear()
-        self._null_adapters.clear()
         await self.store.close()
 
     @staticmethod
@@ -298,193 +275,117 @@ class Workspace:
         return _normalize_graph_paths(graph, self.project_root)
 
     # ------------------------------------------------------------------
-    # On-access freshness
+    # Connected-set re-index (watcher + on-access)
     # ------------------------------------------------------------------
 
-    async def ensure_fresh(
-        self, file_path: Path, *, semantic: bool = False
-    ) -> str:
+    async def reindex_connected(self, changed: Iterable[str]) -> None:
         """
-        Ensure file_path is up-to-date in the store and report its status.
+        Re-index every changed file together with its connected files.
 
-        Returns 'ok', 'skeleton', or 'degraded'. The file itself is
-        re-indexed on access when its bytes changed. For semantic queries
-        the status is additionally downgraded to 'degraded' when one of the
-        file's *imported dependencies* changed on disk: single-file analysis
-        cannot re-resolve cross-file calls into the new definition, so the
-        stored edges may be stale until a full ``reindex`` — and the agent
-        should be told, not handed an 'ok' it cannot trust (transitive
-        freshness).
+        The connected set is the changed file plus the files that import it
+        (so their cross-file edges into the new definition are rebuilt) and
+        the files it imports. Analyzing the set together lets the resolver
+        re-link calls across those files, so the result is a full graph for
+        the affected region — not a single-file approximation. Deleted files
+        are pruned and their importers refreshed.
+        """
+        affected: set[str] = set()
+        deleted: set[str] = set()
+        for raw in changed:
+            path_str = await _aresolve(Path(raw))
+            # Compute connections from the *current* graph, before pruning.
+            connected = set(await self.store.get_importer_files(path_str))
+            connected |= set(await self.store.get_imported_files(path_str))
+            affected |= connected
+            if await _exists(path_str):
+                affected.add(path_str)
+            else:
+                deleted.add(path_str)
+
+        for path_str in deleted:
+            await self.store.delete_file(path_str)
+            logger.info("Pruned deleted file from graph: %s", path_str)
+
+        by_lang: dict[str, list[Path]] = {}
+        for path_str in affected - deleted:
+            if not await _exists(path_str):
+                continue
+            lang = _detect_language(Path(path_str))
+            if lang is not None:
+                by_lang.setdefault(lang, []).append(Path(path_str))
+
+        for lang, paths in by_lang.items():
+            await self._reindex_lang(lang, paths)
+
+    async def _reindex_lang(self, lang: str, paths: list[Path]) -> None:
+        """Full-analyze *paths* of one language and persist each file."""
+        adapter = self._adapter(lang)
+        if adapter is None:
+            return
+        async with self._semaphore:
+            graph = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: adapter.analyze(self.project_root, files=paths)
+            )
+        graph = _normalize_graph_paths(graph, self.project_root)
+        file_status = _resolver_to_file_status(
+            ResolverStatus.from_value(
+                graph.metadata.get(RESOLVER_STATUS_KEY, "ok")
+            )
+        )
+        for path in paths:
+            path_str = await _aresolve(path)
+            try:
+                stat = await _astat(path_str)
+            except OSError:
+                continue
+            sub = graph.subgraph_for_file(path_str)
+            await self.store.apply_patch(
+                sub,
+                path_str,
+                _file_hash(path_str),
+                stat.st_mtime,
+                stat.st_size,
+                file_status,
+                lang,
+            )
+
+    # ------------------------------------------------------------------
+    # On-access freshness (correctness backstop; watcher is proactive)
+    # ------------------------------------------------------------------
+
+    async def ensure_fresh(self, file_path: Path) -> str:
+        """
+        Ensure *file_path* is current and return its graph status.
+
+        The watcher keeps the graph fresh proactively; this is the on-access
+        guarantee for a tool that touches a file before the watcher has
+        processed it (or when no watcher runs). A changed or new file
+        triggers a connected-set re-index. Returns 'ok' or 'degraded'.
         """
         path_str = await _aresolve(file_path)
-        base = await self._ensure_fresh_self(
-            file_path, path_str, semantic=semantic
-        )
-        if (
-            semantic
-            and base in ("ok", "degraded")
-            and await self._dependency_stale(path_str)
-        ):
-            return "degraded"
-        return base
-
-    async def _ensure_fresh_self(
-        self, file_path: Path, path_str: str, *, semantic: bool
-    ) -> str:
-        """Freshness of *file_path* itself (no transitive dependency check)."""
         try:
             stat = await _astat(path_str)
         except OSError:
-            # File removed on disk — prune any stale graph state we still
-            # hold for it so deleted symbols stop surfacing in
-            # search/callers/references.
+            # Removed on disk — prune (and refresh its importers).
             if await self.store.get_file_info(path_str) is not None:
-                await self.store.delete_file(path_str)
-                logger.info("Pruned deleted file from graph: %s", path_str)
+                await self.reindex_connected({path_str})
             return "ok"
 
         info = await self.store.get_file_info(path_str)
-
         if info is not None:
             if info["mtime"] == stat.st_mtime and info["size"] == stat.st_size:
-                # Fast path: unchanged
-                if semantic and info["status"] == "skeleton":
-                    await self._in_flight.get_or_create(
-                        path_str,
-                        lambda: self._index_semantic(file_path, stat),
-                    )
-                    refreshed = await self.store.get_file_info(path_str)
-                    return refreshed["status"] if refreshed else info["status"]
                 return info["status"]
-
-            # mtime/size differ — check content hash to avoid false positives
-            content_hash = _file_hash(path_str)
-            if content_hash == info["hash"]:
+            if _file_hash(path_str) == info["hash"]:
                 await self.store.update_file_mtime(
                     path_str, stat.st_mtime, stat.st_size
                 )
                 return info["status"]
 
-        # Slow path: file changed or not yet indexed
         await self._in_flight.get_or_create(
-            path_str,
-            lambda: self._index_file(file_path, stat, semantic=semantic),
+            path_str, lambda: self.reindex_connected({path_str})
         )
         new_info = await self.store.get_file_info(path_str)
-        return new_info["status"] if new_info else "skeleton"
-
-    async def _dependency_stale(self, path_str: str) -> bool:
-        """
-        Return True if a file *path_str* imports changed/vanished on disk.
-
-        Cheap on the common path: a stat per recorded dependency, hashing
-        only when mtime/size already differ (so a mere ``touch`` does not
-        trigger a false stale).
-        """
-        for imported in await self.store.get_imported_files(path_str):
-            info = await self.store.get_file_info(imported)
-            if info is None:
-                continue  # never indexed as a tracked file; nothing to compare
-            try:
-                st = await _astat(imported)
-            except OSError:
-                return True  # a dependency was deleted out from under us
-            if info["mtime"] == st.st_mtime and info["size"] == st.st_size:
-                continue
-            if _file_hash(imported) != info["hash"]:
-                return True
-        return False
-
-    # ------------------------------------------------------------------
-    # Internal indexing
-    # ------------------------------------------------------------------
-
-    async def _index_file(
-        self, file_path: Path, stat: os.stat_result, *, semantic: bool
-    ) -> None:
-        """Phase 1 (skeleton) + optional Phase 2 (semantic)."""
-        await self._index_skeleton(file_path, stat)
-        if semantic:
-            await self._index_semantic(file_path, stat)
-
-    async def _index_skeleton(
-        self, file_path: Path, stat: os.stat_result
-    ) -> None:
-        """Phase 1: structure-only using NullResolver."""
-        lang = _detect_language(file_path)
-        if lang is None:
-            return
-
-        null_adapter = self._null_adapter(lang)
-        if null_adapter is None:
-            return
-
-        path_str = await _aresolve(file_path)
-        file_hash = _file_hash(path_str)
-
-        async with self._semaphore:
-            graph = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: null_adapter.analyze(
-                    self.project_root, files=[file_path]
-                ),
-            )
-        graph = _normalize_graph_paths(graph, self.project_root)
-
-        await self.store.apply_patch(
-            graph,
-            path_str,
-            file_hash,
-            stat.st_mtime,
-            stat.st_size,
-            "skeleton",
-            lang,
-        )
-
-    async def _index_semantic(
-        self, file_path: Path, stat: os.stat_result
-    ) -> None:
-        """Phase 2: full semantic indexing."""
-        lang = _detect_language(file_path)
-        if lang is None:
-            return
-
-        adapter = self._adapter(lang)
-        if adapter is None:
-            return
-
-        path_str = await _aresolve(file_path)
-        file_hash = _file_hash(path_str)
-
-        # Guard against stale result: re-check hash before applying
-        async with self._semaphore:
-            graph = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: adapter.analyze(self.project_root, files=[file_path]),
-            )
-        graph = _normalize_graph_paths(graph, self.project_root)
-
-        current_hash = _file_hash(path_str)
-        if current_hash != file_hash:
-            logger.debug(
-                "File %s changed during semantic index; discarding.", path_str
-            )
-            return
-
-        resolver_status = ResolverStatus.from_value(
-            graph.metadata.get(RESOLVER_STATUS_KEY, "ok")
-        )
-        file_status = _resolver_to_file_status(resolver_status)
-
-        await self.store.apply_patch(
-            graph,
-            path_str,
-            file_hash,
-            stat.st_mtime,
-            stat.st_size,
-            file_status,
-            lang,
-        )
+        return new_info["status"] if new_info else "degraded"
 
 
 # ------------------------------------------------------------------
@@ -500,6 +401,11 @@ async def _astat(path: str | Path) -> os.stat_result:
 async def _aresolve(path: Path) -> str:
     """Resolve *path* to an absolute string off the event loop."""
     return str(await asyncio.to_thread(path.resolve))
+
+
+async def _exists(path: str) -> bool:
+    """Return True if *path* exists on disk (checked off the event loop)."""
+    return await asyncio.to_thread(Path(path).exists)
 
 
 def _normalize_graph_paths(graph: GraphLens, project_root: Path) -> GraphLens:
@@ -627,8 +533,6 @@ def _file_hash(path: str) -> str:
 
 
 def _resolver_to_file_status(status: ResolverStatus) -> str:
-    if status == ResolverStatus.OK:
-        return "ok"
-    if status == ResolverStatus.DEGRADED:
-        return "degraded"
-    return "skeleton"
+    # No more "skeleton": every index is a full analyze, so a non-ok resolver
+    # (e.g. a missing language toolchain) is reported honestly as 'degraded'.
+    return "ok" if status == ResolverStatus.OK else "degraded"

@@ -65,8 +65,8 @@ async def test_deleted_file_is_pruned_on_access(py_project: Path):
 
 
 async def test_edit_is_picked_up_on_next_query(py_project: Path):
-    # On-access freshness: an edit (by a human or agent) is reflected on the next query,
-    # with no file watcher — the changed file is re-indexed when it is next touched.
+    # On-access correctness: an edit (by a human or agent) is reflected on the
+    # next query — the changed file is re-indexed (full) when next touched.
     ws = await _indexed(py_project)
     try:
         a_py = py_project / "pkg" / "a.py"
@@ -77,7 +77,7 @@ async def test_edit_is_picked_up_on_next_query(py_project: Path):
         a_py.write_text(
             a_py.read_text() + "\n\ndef freshly_added():\n    return 1\n"
         )
-        await ws.ensure_fresh(a_py, semantic=True)
+        await ws.ensure_fresh(a_py)
 
         after = {n["name"] for n in await ws.store.get_nodes_in_file(a_abs)}
         assert "freshly_added" in after
@@ -85,47 +85,77 @@ async def test_edit_is_picked_up_on_next_query(py_project: Path):
         await ws.store.close()
 
 
-async def test_dependency_change_degrades_importer(py_project: Path):
-    # Transitive freshness: b.py imports a.py. Editing a.py and then querying b.py
-    # (semantic) must report 'degraded', not a false 'ok' — single-file analysis cannot
-    # re-resolve b's cross-file calls into a's new definition until a full reindex.
+async def test_changed_file_reindexes_connected_importers(py_project: Path):
+    # b.py imports a.py and b.use calls a.helper. Editing a.py and re-indexing
+    # it must rebuild the connected set (a + its importer b) together, so the
+    # cross-file caller edge b.use -> a.helper is preserved (a lone single-file
+    # re-index of a could not see b and would drop it).
     ws = await _indexed(py_project)
     try:
         a_py = py_project / "pkg" / "a.py"
-        b_py = py_project / "pkg" / "b.py"
-        # b is fully resolved before the dependency changes
-        assert await ws.ensure_fresh(b_py, semantic=True) == "ok"
+        helper_id = await _func_id(ws, "helper")
+        before = {n["name"] for n in await ws.store.get_callers(helper_id)}
+        assert {"main", "use"} <= before
 
-        a_py.write_text(a_py.read_text().replace("x + 1", "x + 999"))
-        # b itself is unchanged on disk, but its dependency a.py changed
-        assert await ws.ensure_fresh(b_py, semantic=True) == "degraded"
+        a_py.write_text(a_py.read_text().replace("x + 1", "x + 2"))
+        await ws.ensure_fresh(a_py)
+
+        after = {n["name"] for n in await ws.store.get_callers(helper_id)}
+        assert {"main", "use"} <= after  # b.use edge survived the rebuild
     finally:
         await ws.store.close()
 
 
-async def test_background_refresh_picks_up_edits_without_a_query(
+async def test_deleting_a_dependency_prunes_and_refreshes_importers(
     py_project: Path,
 ):
-    # The background sweep must re-index a file edited on disk even though no
-    # tool ever queries it (get_nodes_in_file is a plain read, not ensure_fresh).
+    # Deleting a.py prunes its nodes and re-indexes b.py (its importer), so the
+    # graph no longer reports a.helper at all.
     ws = await _indexed(py_project)
     try:
         a_py = py_project / "pkg" / "a.py"
         a_abs = str(a_py.resolve())
-        a_py.write_text(
-            a_py.read_text() + "\n\ndef bg_added():\n    return 1\n"
-        )
+        assert await ws.store.get_nodes_in_file(a_abs)
 
-        ws.start_background_refresh(interval=0.05)
+        a_py.unlink()
+        await ws.reindex_connected({a_abs})
+
+        # a's nodes (the real helper definition) are pruned; any "helper" left
+        # in search is b.py's now-dangling import stub, not a definition in a.py.
+        assert await ws.store.get_nodes_in_file(a_abs) == []
+        assert all(
+            h.get("file_path") != a_abs
+            for h in await ws.store.search_symbols("helper")
+        )
+    finally:
+        await ws.store.close()
+
+
+async def test_watcher_reindexes_edited_file(py_project: Path, monkeypatch):
+    # End-to-end: the watcher (the single freshness mechanism) re-indexes a
+    # file edited on disk without any tool query. Force polling so the test is
+    # deterministic regardless of the sandbox's inotify support.
+    monkeypatch.setenv("WATCHFILES_FORCE_POLLING", "true")
+    ws = await _indexed(py_project)
+    try:
+        a_py = py_project / "pkg" / "a.py"
+        a_abs = str(a_py.resolve())
+        edited = a_py.read_text() + "\n\ndef watched_add():\n    return 1\n"
+        ws.start_watching()
+        await asyncio.sleep(1.0)  # let the watcher establish its baseline
+
         names: set[str] = set()
-        for _ in range(100):
-            await asyncio.sleep(0.05)
+        for _ in range(75):  # ~15s budget
+            # Re-write each iteration so a poll cycle always sees an mtime
+            # change, regardless of when the watcher armed.
+            a_py.write_text(edited)
+            await asyncio.sleep(0.2)
             names = {
                 n["name"] for n in await ws.store.get_nodes_in_file(a_abs)
             }
-            if "bg_added" in names:
+            if "watched_add" in names:
                 break
-        assert "bg_added" in names
+        assert "watched_add" in names
     finally:
         await ws.close()
 

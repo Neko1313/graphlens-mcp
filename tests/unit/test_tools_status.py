@@ -19,7 +19,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.tools]
 
 
 async def test_aggregate_status_takes_worst_across_returned_files(store):
-    # Arrange: one file indexed 'ok', another 'skeleton'
+    # Arrange: one file indexed 'ok', another 'degraded'
     await store.apply_patch(
         graph_of([make_node("a.x", file_path="/a.py")], []),
         "/a.py",
@@ -35,12 +35,12 @@ async def test_aggregate_status_takes_worst_across_returned_files(store):
         "h",
         1.0,
         1,
-        "skeleton",
+        "degraded",
         "python",
     )
     rows = [{"file_path": "/a.py"}, {"file_path": "/b.py"}]
-    # Act / Assert: even with an 'ok' base, a skeleton file in the result degrades it
-    assert await _aggregate_status(store, "ok", rows) == "skeleton"
+    # Act / Assert: an 'ok' base plus a degraded file in the result degrades it
+    assert await _aggregate_status(store, "ok", rows) == "degraded"
     assert (
         await _aggregate_status(store, "ok", [{"file_path": "/a.py"}]) == "ok"
     )

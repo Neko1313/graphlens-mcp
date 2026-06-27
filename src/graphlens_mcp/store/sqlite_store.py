@@ -26,11 +26,13 @@ _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 # rather than migrating it (see ARCHITECTURE.md). The stored fingerprint
 # also folds in graphlens' own model SCHEMA_VERSION, so a core model
 # change invalidates the cache too.
-LOCAL_SCHEMA_VERSION = 2
+LOCAL_SCHEMA_VERSION = 3
 
 _ALL_TABLES = ("nodes_fts", "edges", "nodes", "deps", "files", "meta")
 
-_GRAPH_STATUS_PRIORITY = {"skeleton": 0, "degraded": 1, "ok": 2}
+# No "skeleton": every index is a full analyze, so a file is either fully
+# resolved ('ok') or resolved as far as the toolchain allows ('degraded').
+_GRAPH_STATUS_PRIORITY = {"degraded": 0, "ok": 1}
 
 
 def _schema_fingerprint() -> str:
@@ -53,7 +55,7 @@ def _worst_status(*statuses: str) -> str:
 
 def worst_status(*statuses: str) -> str:
     """
-    Return the least-complete of *statuses* (skeleton < degraded < ok).
+    Return the least-complete of *statuses* (degraded < ok).
 
     Public helper so the tool layer can fold a query's own freshness
     status together with the stored status of every node it returns.
@@ -248,6 +250,40 @@ class SqliteStore:
             r["dep"] for r in rows if r["dep"] and r["dep"] != importer_path
         ]
 
+    async def get_importer_files(self, imported_path: str) -> list[str]:
+        """
+        Return the files that import *imported_path* (reverse of imports).
+
+        The inverse of :meth:`get_imported_files`: resolves ``IMPORTS`` edges
+        that point straight at *imported_path*, plus edges to a fileless
+        MODULE node whose symbols live in *imported_path*. Used to rebuild
+        the files connected to a changed/deleted file so their cross-file
+        edges stay correct.
+        """
+        sql = """
+        SELECT DISTINCT sn.file_path AS importer
+        FROM edges e
+        JOIN nodes sn ON sn.id = e.source_id AND sn.file_path IS NOT NULL
+        JOIN nodes tn ON tn.id = e.target_id AND tn.file_path = :imp
+        WHERE e.kind = 'imports'
+        UNION
+        SELECT DISTINCT sn.file_path AS importer
+        FROM edges e
+        JOIN nodes sn ON sn.id = e.source_id AND sn.file_path IS NOT NULL
+        JOIN nodes tmod ON tmod.id = e.target_id AND tmod.file_path IS NULL
+        JOIN nodes m ON m.file_path = :imp
+          AND (m.qualified_name = tmod.qualified_name
+               OR m.qualified_name LIKE tmod.qualified_name || '.%')
+        WHERE e.kind = 'imports'
+        """
+        async with self._read_conn.execute(sql, {"imp": imported_path}) as cur:
+            rows = await cur.fetchall()
+        return [
+            r["importer"]
+            for r in rows
+            if r["importer"] and r["importer"] != imported_path
+        ]
+
     async def update_file_mtime(
         self, path: str, mtime: float, size: int
     ) -> None:
@@ -269,7 +305,7 @@ class SqliteStore:
             file_paths,
         ) as cur:
             rows = await cur.fetchall()
-        statuses = [r["status"] for r in rows] if rows else ["skeleton"]
+        statuses = [r["status"] for r in rows] if rows else ["degraded"]
         return _worst_status(*statuses)
 
     # ------------------------------------------------------------------

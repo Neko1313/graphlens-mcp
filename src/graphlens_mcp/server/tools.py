@@ -77,13 +77,11 @@ def _resolve_in_project(workspace: Workspace, path: str) -> Path:
     return p.resolve()
 
 
-async def _fresh_status(
-    workspace: Workspace, node: dict, *, semantic: bool
-) -> str:
+async def _fresh_status(workspace: Workspace, node: dict) -> str:
     file_path = node.get("file_path")
     if not file_path:
         return "ok"
-    return await workspace.ensure_fresh(Path(file_path), semantic=semantic)
+    return await workspace.ensure_fresh(Path(file_path))
 
 
 async def _aggregate_status(
@@ -93,9 +91,9 @@ async def _aggregate_status(
     Fold *base_status* with the stored status of every returned file.
 
     The freshness check only refreshes the queried node's own file, so a
-    walk can return callers/callees from files that were last indexed at
-    ``skeleton`` quality. Reporting only the queried node's status would
-    let the agent treat such a partial answer as complete; instead we
+    walk can return callers/callees from files indexed at ``degraded``
+    quality (a missing toolchain). Reporting only the queried node's status
+    would let the agent treat such a partial answer as complete; instead we
     surface the worst status across all returned files.
     """
     paths = sorted({r["file_path"] for r in rows if r.get("file_path")})
@@ -145,7 +143,7 @@ async def tool_get_node_info(
     if node is None:
         return NodeInfoResult(error=f"Node {node_id!r} not found")
 
-    status = await _fresh_status(workspace, node, semantic=False)
+    status = await _fresh_status(workspace, node)
     node = await store.get_node(node_id) or node
     source = _read_span(node.get("file_path"), node.get("span_json"))
     return NodeInfoResult(
@@ -184,13 +182,12 @@ async def _walk_tool(
     node_id: str,
     query: Callable[[], Awaitable[list[dict[str, Any]]]],
     *,
-    semantic: bool,
     limit: int,
 ) -> GraphResult:
     node = await store.get_node(node_id)
     if node is None:
         return GraphResult(error=f"Node {node_id!r} not found")
-    base = await _fresh_status(workspace, node, semantic=semantic)
+    base = await _fresh_status(workspace, node)
     rows = await query()
     refs, truncated = to_refs(rows, limit)
     status = await _aggregate_status(store, base, rows)
@@ -220,7 +217,6 @@ async def tool_get_callees(
         workspace,
         node_id,
         lambda: store.get_callees(node_id, max_depth=depth),
-        semantic=True,
         limit=limit,
     )
 
@@ -243,7 +239,6 @@ async def tool_get_callers(
         workspace,
         node_id,
         lambda: store.get_callers(node_id, max_depth=depth),
-        semantic=True,
         limit=limit,
     )
 
@@ -266,7 +261,6 @@ async def tool_get_neighbors(
         workspace,
         node_id,
         lambda: store.get_neighbors(node_id, depth=hops),
-        semantic=False,
         limit=limit,
     )
 
@@ -288,7 +282,6 @@ async def tool_find_references(
         workspace,
         node_id,
         lambda: store.find_references(node_id),
-        semantic=True,
         limit=limit,
     )
 
@@ -311,6 +304,5 @@ async def tool_get_cross_language_calls(
         workspace,
         node_id,
         lambda: store.get_cross_language_calls(node_id),
-        semantic=False,
         limit=limit,
     )

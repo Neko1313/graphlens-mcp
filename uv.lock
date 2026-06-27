@@ -470,6 +470,7 @@ dependencies = [
     { name = "graphlens", extra = ["go", "php", "python", "rust", "typescript"] },
     { name = "questionary" },
     { name = "tomlkit" },
+    { name = "watchfiles" },
 ]
 
 [package.dev-dependencies]
@@ -493,6 +494,7 @@ requires-dist = [
     { name = "graphlens", extras = ["go", "python", "rust", "typescript", "php"], specifier = ">=0.7.0" },
     { name = "questionary", specifier = ">=2.0.1" },
     { name = "tomlkit", specifier = ">=0.15.0" },
+    { name = "watchfiles", specifier = ">=0.24" },
 ]
 
 [package.metadata.requires-dev]

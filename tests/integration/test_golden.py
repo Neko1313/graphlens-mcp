@@ -64,7 +64,7 @@ async def _batch_and_incremental(root: Path, files: list[Path], incr_db: Path):
     await batch.full_index()
     incr = await Workspace.create(root, incr_db)
     for f in files:
-        await incr.ensure_fresh(f, semantic=True)
+        await incr.ensure_fresh(f)
     return batch, incr
 
 

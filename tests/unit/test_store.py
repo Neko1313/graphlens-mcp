@@ -187,13 +187,13 @@ async def test_worst_status_for_files_reports_least_complete(store):
         "h",
         1.0,
         1,
-        "skeleton",
+        "degraded",
         "python",
     )
     # Act / Assert: the aggregate is the least-complete of the two
     assert (
         await store.get_worst_status_for_files(["/a.py", "/b.py"])
-        == "skeleton"
+        == "degraded"
     )
     assert await store.get_worst_status_for_files(["/a.py"]) == "ok"
 

@@ -10,15 +10,11 @@ from graphlens import (
     ResolverStatus,
     adapter_registry,
 )
-from graphlens.contracts.resolver import (
-    Occurrence,
-    Query,
-    ResolvedRef,
-    SymbolResolver,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from graphlens.contracts.resolver import SymbolResolver
 
 logger = logging.getLogger(__name__)
 
@@ -32,51 +28,6 @@ INSTALL_HINTS: dict[str, str] = {
     "typescript": "Install Node.js: https://nodejs.org/",
     "php": "Install PHP: https://www.php.net/downloads",
 }
-
-
-class NullResolver(SymbolResolver):
-    """Skeleton-only resolver — returns no results, status UNAVAILABLE."""
-
-    # Argument names must match SymbolResolver (override compatibility), but
-    # this skeleton resolves nothing, so each method marks its required-by-
-    # interface parameters intentionally-unused via ``del`` (keeps ARG002
-    # active without renaming).
-
-    def prepare(self, project_root: Path, files: list[Path]) -> None:
-        """No-op: the skeleton resolver has nothing to prepare."""
-        del project_root, files
-
-    def definition_at(
-        self, file: Path, line: int, col: int
-    ) -> ResolvedRef | None:
-        """Return None — definitions are not resolved in skeleton mode."""
-        del file, line, col
-        return None
-
-    def resolve_all(self, queries: list[Query]) -> list[ResolvedRef | None]:
-        """Return one None per query — nothing is resolved in skeleton mode."""
-        return [None] * len(queries)
-
-    def infer_type_at(
-        self, file: Path, line: int, col: int
-    ) -> ResolvedRef | None:
-        """Return None — types are not inferred in skeleton mode."""
-        del file, line, col
-        return None
-
-    def references_to(
-        self, file: Path, line: int, col: int
-    ) -> list[Occurrence]:
-        """Return empty — references are not resolved in skeleton mode."""
-        del file, line, col
-        return []
-
-    def status(self) -> ResolverStatus:
-        """Report UNAVAILABLE — this resolver resolves nothing."""
-        return ResolverStatus.UNAVAILABLE
-
-
-_NULL = NullResolver()
 
 
 def _adapter_cls(language: str) -> type[LanguageAdapter] | None:
@@ -95,34 +46,6 @@ def get_adapter(language: str) -> LanguageAdapter | None:
         return cls()
     except Exception:
         logger.warning("Failed to instantiate adapter for %s", language)
-        return None
-
-
-def get_null_adapter(language: str) -> LanguageAdapter | None:
-    """
-    Return an adapter configured with NullResolver (skeleton-only).
-
-    Returns None if the adapter does not accept a ``resolver=`` kwarg —
-    falling back to the real adapter would silently break the
-    skeleton contract.
-    """
-    cls = _adapter_cls(language)
-    if cls is None:
-        return None
-    try:
-        # Dynamic probe: concrete adapters accept resolver=, the base
-        # type does not declare it. TypeError below handles adapters
-        # that genuinely reject it.
-        return cls(resolver=_NULL)  # ty: ignore[unknown-argument]
-    except TypeError:
-        logger.debug(
-            "Adapter %r does not accept resolver= kwarg; "
-            "skeleton indexing skipped.",
-            language,
-        )
-        return None
-    except Exception:
-        logger.warning("Failed to instantiate null adapter for %s", language)
         return None
 
 
