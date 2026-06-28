@@ -114,6 +114,12 @@ tasks:
     cmds:
       - uv version {{.VERSION}} --frozen
       - uv lock
+      # server.json has no native bump tool, so keep its version (and the pinned
+      # PyPI package version it advertises) in lockstep with pyproject via jq.
+      - |
+        tmp=$(mktemp)
+        jq --arg v "{{.VERSION}}" '.version = $v | .packages[0].version = $v' server.json > "$tmp"
+        mv "$tmp" server.json
 
   release:changelog:
     desc: Generate CHANGELOG.md (requires TAG=vX.Y.Z)
@@ -128,7 +134,7 @@ tasks:
       vars: [TAG]
     cmds:
       - |
-        git add pyproject.toml uv.lock CHANGELOG.md
+        git add pyproject.toml uv.lock CHANGELOG.md server.json
         git commit -m "chore(release): {{.TAG}}"
         git tag -a "{{.TAG}}" -m "Release {{.TAG}}"
 
@@ -146,6 +152,19 @@ tasks:
       - rm -rf dist
       - uv build
       - uv publish
+
+  release:registry:
+    desc: Publish server.json metadata to the official MCP registry (CI uses GitHub OIDC)
+    cmds:
+      # The registry only stores metadata; the package itself must already be on
+      # PyPI (release:publish) so its README — carrying the mcp-name marker — can
+      # be fetched to prove ownership of the io.github.neko1313/* namespace.
+      - |
+        curl -fsSL \
+          "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+          | tar -xz -C /tmp mcp-publisher
+        /tmp/mcp-publisher login github-oidc
+        /tmp/mcp-publisher publish
 
   release:github:
     desc: Create a GitHub Release with changelog notes (requires TAG=vX.Y.Z)
