@@ -254,6 +254,96 @@ async def test_imported_files_escapes_underscore_in_module_name(store):
     assert importers == {"/b.py"}
 
 
+async def _count_communicates(store) -> int:
+    async with store._conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE kind = 'communicates_with'"
+    ) as cur:
+        return (await cur.fetchone())[0]
+
+
+async def test_get_boundary_ports_collects_all_participants(store):
+    # server.py exposes a boundary; client.py consumes it. Asking for the
+    # boundary ports of *just* client.py must still return the server port, so
+    # a re-synthesis pass can rebuild the complete pairwise edge set.
+    server = make_node("svc.serve", file_path="/server.py")
+    client = make_node("web.call", file_path="/client.py")
+    boundary = make_node("http:GET /x", kind=NodeKind.BOUNDARY, file_path=None)
+    await _apply(
+        store,
+        [server, boundary],
+        [make_relation(server, boundary, RelationKind.EXPOSES)],
+        file_path="/server.py",
+    )
+    await _apply(
+        store,
+        [client, boundary],
+        [make_relation(client, boundary, RelationKind.CONSUMES)],
+        file_path="/client.py",
+    )
+    await store.apply_structural(graph_of([boundary], []))
+
+    ports = await store.get_boundary_ports_for_files(["/client.py"])
+    assert set(ports) == {boundary.id}
+    assert set(ports[boundary.id]) == {
+        (server.id, "exposes"),
+        (client.id, "consumes"),
+    }
+
+
+async def test_resynthesize_links_a_newly_added_consumer(store):
+    # A new consumer added incrementally gets no COMMUNICATES_WITH from the
+    # per-file patch (synthesis is a full-index pass). Re-synthesizing the
+    # affected boundary links it without a full reindex.
+    server = make_node("svc.serve", file_path="/server.py")
+    boundary = make_node("http:GET /x", kind=NodeKind.BOUNDARY, file_path=None)
+    await _apply(
+        store,
+        [server, boundary],
+        [make_relation(server, boundary, RelationKind.EXPOSES)],
+        file_path="/server.py",
+    )
+    await store.apply_structural(graph_of([boundary], []))
+    assert await _count_communicates(store) == 0  # no consumer yet
+
+    client = make_node("web.call", file_path="/client.py")
+    await _apply(
+        store,
+        [client, boundary],
+        [make_relation(client, boundary, RelationKind.CONSUMES)],
+        file_path="/client.py",
+    )
+    ports = await store.get_boundary_ports_for_files(["/client.py"])
+    participants = {nid for plist in ports.values() for nid, _ in plist}
+    await store.resynthesize_cross_language(
+        [
+            (server.id, client.id, RelationKind.COMMUNICATES_WITH.value),
+            (client.id, server.id, RelationKind.COMMUNICATES_WITH.value),
+        ],
+        participants,
+    )
+
+    linked = {
+        n["name"] for n in await store.get_cross_language_calls(server.id)
+    }
+    assert "call" in linked
+    assert await _count_communicates(store) == 2  # both directions, deduped
+
+
+async def test_resynthesize_drops_dangling_cross_language_edges(store):
+    # A renamed exposer leaves its old COMMUNICATES_WITH edge pointing at a
+    # node that no longer exists; the re-synthesis pass must prune it.
+    server = make_node("svc.serve", file_path="/server.py")
+    await _apply(store, [server], [], file_path="/server.py")
+    await store.apply_cross_language_edges(
+        [(server.id, "ghost-node", RelationKind.COMMUNICATES_WITH.value)]
+    )
+    assert await _count_communicates(store) == 1
+
+    # 'ghost-node' is not a real node, so the edge is dangling and pruned.
+    await store.resynthesize_cross_language([], set())
+    assert await _count_communicates(store) == 0
+
+
 async def test_cross_language_calls_resolve_through_a_shared_boundary(store):
     # Arrange: exposer (server) and consumer (client) meet at one HTTP boundary
     server = make_node("svc.get_user", file_path="/svc.py")

@@ -106,6 +106,35 @@ async def test_changed_file_reindexes_connected_importers(py_project: Path):
         await ws.store.close()
 
 
+async def test_new_file_relinks_unchanged_importer(py_project: Path):
+    # The "create a file an unchanged file already imports" limitation. consumer
+    # imports pkg.newmod *before* newmod exists, so its call dangles. Creating
+    # newmod and re-indexing only newmod must still re-link the unchanged
+    # consumer (the second importer pass), without a full reindex.
+    pkg = py_project / "pkg"
+    (pkg / "consumer.py").write_text(
+        "from pkg.newmod import thing\n\n\ndef run():\n    return thing()\n"
+    )
+    ws = await _indexed(py_project)
+    try:
+        # Before newmod exists the call cannot resolve to a definition.
+        assert not [
+            h
+            for h in await ws.store.search_symbols("thing")
+            if h["kind"] == "function"
+        ]
+
+        newmod = pkg / "newmod.py"
+        newmod.write_text("def thing():\n    return 7\n")
+        await ws.reindex_connected({str(newmod.resolve())})
+
+        thing_id = await _func_id(ws, "thing")  # newmod.thing now exists
+        callers = {n["name"] for n in await ws.store.get_callers(thing_id)}
+        assert "run" in callers  # unchanged consumer was re-linked
+    finally:
+        await ws.store.close()
+
+
 async def test_deleting_a_dependency_prunes_and_refreshes_importers(
     py_project: Path,
 ):

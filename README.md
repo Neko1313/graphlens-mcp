@@ -118,12 +118,17 @@ watcher.
 
 ## Known limitations
 
-- **Whole-project re-link:** the watcher re-links the *connected set* of a change, not the
-  entire project. A rename that ripples through many indirection layers — or creating a file
-  that an *unchanged* file already imports — may need a full `reindex` for an exact graph.
+- **Connected-set re-link, deep ripples:** the watcher re-links the *connected set* of a
+  change (the changed file plus its direct importers and imports), not the entire project. A
+  rename that ripples through many indirection layers may need a full `reindex` for an exact
+  graph. Creating a file that an *unchanged* file already imports is handled — a second
+  importer pass re-links that importer once the new file is indexed.
 - **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
-  rebuilt on a full `reindex`; they can erode across incremental edits (the boundary-based
-  query still resolves connections). Run `reindex` for an exact cross-language view.
+  re-synthesized for every boundary a re-indexed file touches, so a new or moved
+  exposer/consumer is linked without a full `reindex`. A change that leaves a boundary
+  entirely (a file that stops exposing an endpoint others still consume) may still need a
+  full `reindex` for an exact cross-language view; the boundary-based query resolves
+  connections regardless.
 
 ## Uninstall
 
