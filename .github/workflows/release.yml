@@ -5,6 +5,9 @@ on:
 
 permissions:
   contents: write
+  # Lets the MCP registry publish step mint a GitHub OIDC token to prove
+  # ownership of the io.github.neko1313/* namespace — no stored secret needed.
+  id-token: write
 
 jobs:
   release:
@@ -66,7 +69,13 @@ jobs:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: task release:publish
 
-      # 6. Create the GitHub Release
+      # 6. Publish server metadata to the official MCP registry. Runs after PyPI
+      # so the just-published README (with the mcp-name marker) can be fetched to
+      # verify namespace ownership; auth is GitHub OIDC via id-token: write.
+      - name: Publish to MCP Registry
+        run: task release:registry
+
+      # 7. Create the GitHub Release
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
