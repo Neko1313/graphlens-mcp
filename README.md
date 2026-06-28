@@ -1,6 +1,6 @@
 # graphlens-mcp
 
-<!-- mcp-name: io.github.neko1313/graphlens-mcp -->
+<!-- mcp-name: io.github.Neko1313/graphlens-mcp -->
 
 [![CI](https://github.com/Neko1313/graphlens-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Neko1313/graphlens-mcp/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-github%20pages-blue)](https://neko1313.github.io/graphlens-mcp/)
