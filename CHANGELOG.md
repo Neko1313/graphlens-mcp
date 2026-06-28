@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-06-28
+### Features
+
+- **registry**: feat(registry): declare mcp-name in README for MCP registry ownership by @Neko1313 in [#5](https://github.com/Neko1313/graphlens-mcp/pull/5)
+
+
+
+
+**Full Changelog**: https://github.com/Neko1313/graphlens-mcp/compare/v0.1.2...v0.2.0
 ## [0.1.2] - 2026-06-27
 ### Bug Fixes
 
