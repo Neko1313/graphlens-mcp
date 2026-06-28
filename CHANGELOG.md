@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-06-28
+### Bug Fixes
+
+- **release**: ci(release): auto-publish server.json to the official MCP registry by @Neko1313 in [#6](https://github.com/Neko1313/graphlens-mcp/pull/6)
+
+
+
+
+**Full Changelog**: https://github.com/Neko1313/graphlens-mcp/compare/v0.2.0...v0.2.1
 ## [0.2.0] - 2026-06-28
 ### Features
 
