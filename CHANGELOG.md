@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - 2026-06-28
+### Bug Fixes
+
+- **registry**: fix(registry): match canonical GitHub namespace casing (Neko1313) by @Neko1313 in [#7](https://github.com/Neko1313/graphlens-mcp/pull/7)
+
+
+
+
+**Full Changelog**: https://github.com/Neko1313/graphlens-mcp/compare/v0.2.1...v0.2.2
 ## [0.2.1] - 2026-06-28
 ### Bug Fixes
 
