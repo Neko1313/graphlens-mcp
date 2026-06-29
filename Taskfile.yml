@@ -15,9 +15,12 @@ tasks:
     silent: true
 
   install:
-    desc: Sync the virtualenv with all dependency groups
+    desc: Sync the virtualenv with all dependency groups + the semantic extra
+    # The semantic extra is included so the dev/CI environment type-checks and
+    # tests the optional semantic layer (semble + scikit-learn). The package
+    # itself still ships it as an opt-in extra; this only affects tooling.
     cmds:
-      - uv sync --all-groups
+      - uv sync --all-groups --extra semantic
 
   lint:
     desc: Lint with ruff (curated ruleset in ruff.toml)
@@ -52,6 +55,12 @@ tasks:
 
   test:
     desc: Run the test suite with coverage
+    # Keep the embedding model off the network: the semantic tests drive the
+    # real code paths with a monkeypatched model and assert the offline-degrade
+    # behavior, so a CI run must never try to download potion-code-16M (which
+    # would be slow and flaky). Tests that need a live model are skipped.
+    env:
+      HF_HUB_OFFLINE: "1"
     cmds:
       - uv run pytest --cov=src --cov-report=term-missing
 

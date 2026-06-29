@@ -82,10 +82,26 @@ def test_is_network_error_and_reason():
     assert not _is_network_error(other)
 
 
-def test_semantic_availability_present_in_this_env():
-    # The test env installs the [semantic] extra, so availability is ok here;
-    # the absent-extra path is covered by the ImportError guard in the source.
-    assert semantic_availability().ok
+def test_semantic_availability_reports_install_hint_when_absent(monkeypatch):
+    # Deterministic regardless of whether the [semantic] extra is installed:
+    # block the optional imports and assert the layer reports itself off with
+    # an actionable install hint (the contract the base install relies on).
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name in ("semble", "sklearn") or name.startswith(
+            ("semble.", "sklearn.")
+        ):
+            msg = "blocked for test"
+            raise ImportError(msg)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    av = semantic_availability()
+    assert av.ok is False
+    assert av.reason and "extra" in av.reason
 
 
 # ---- cluster assembly (deterministic, numpy only) ------------------------
@@ -157,7 +173,7 @@ async def test_compute_clusters_returns_none_below_min(monkeypatch):
 async def test_compute_clusters_end_to_end_with_fake_model(monkeypatch):
     np = pytest.importorskip("numpy")
     pytest.importorskip("sklearn")
-    import model2vec
+    model2vec = pytest.importorskip("model2vec")
 
     class FakeModel:
         @staticmethod

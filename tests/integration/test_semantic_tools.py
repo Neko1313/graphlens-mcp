@@ -172,7 +172,7 @@ async def test_find_related_unknown_node(py_project: Path):
 async def test_list_clusters_unavailable_is_graceful(
     py_project: Path, monkeypatch
 ):
-    import model2vec
+    model2vec = pytest.importorskip("model2vec")
 
     def boom(_id):
         msg = "ProxyError 403 Forbidden fetching model"
