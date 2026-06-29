@@ -101,6 +101,30 @@ a partial answer for a complete one.
 | `get_neighbors` | Nodes within N hops in any direction |
 | `find_references` | Non-call usages (type annotations, assignments) |
 | `get_cross_language_calls` | Connections across service boundaries (HTTP/gRPC/queues) |
+| `search_code` | Regex/text over file **content** — the grep replacement (string literals, logs, comments, config) |
+| `search_semantic` ¹ | Search by **meaning**; each hit carries the graph node ids it overlaps |
+| `find_related` ¹ | Find code semantically similar to a symbol |
+| `list_clusters` ¹ | Labeled semantic zones of the codebase (auth, serialization, …) |
+| `get_cluster` ¹ | The cluster a symbol belongs to and its sibling members |
+
+¹ Requires the optional `[semantic]` extra (see below). When it is not installed — or the
+embedding model can't be fetched — these tools return `available=false` with a reason
+instead of failing, so the agent falls back to `search_symbols` / `search_code`.
+
+### Semantic search & clusters (optional)
+
+The goal is for an agent to navigate entirely through these tools instead of `grep`.
+`search_code` (the grep replacement) needs no extra; search-by-meaning and clustering add
+[semble](https://github.com/MinishLab/semble) (static embeddings + BM25) and scikit-learn:
+
+```bash
+uv tool install "graphlens-mcp[semantic]"   # or: pipx install "graphlens-mcp[semantic]"
+```
+
+The embedding model (`potion-code-16M`) is fetched once at first use and cached; it runs on
+CPU, no API key required. semble's index is persisted in `.graphlens/semble-index`; clusters
+recompute lazily after edits and are checkpointed so an interrupted build resumes rather than
+restarting. See [docs/design/semantic-search.md](docs/design/semantic-search.md).
 
 ## Freshness model
 

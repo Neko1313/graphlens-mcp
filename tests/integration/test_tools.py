@@ -87,6 +87,14 @@ async def test_create_mcp_registers_all_tools_with_output_schemas(
             "get_neighbors",
             "find_references",
             "get_cross_language_calls",
+            # Semantic layer ([semantic] extra): registered unconditionally so
+            # the schema is always advertised; they report available=false at
+            # call time when the extra/model is missing.
+            "search_code",
+            "search_semantic",
+            "find_related",
+            "list_clusters",
+            "get_cluster",
         }
         # The output schema is what eval-of-annotation produces; it must exist
         # and describe the typed envelope rather than being absent/empty.

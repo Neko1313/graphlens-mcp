@@ -39,6 +39,7 @@ from graphlens_mcp.indexer.resolvers import (
     find_language_roots,
     get_adapter,
 )
+from graphlens_mcp.indexer.semantic import SemanticIndex
 from graphlens_mcp.store.sqlite_store import SqliteStore
 
 if TYPE_CHECKING:
@@ -68,6 +69,22 @@ logger = logging.getLogger(__name__)
 
 _GRAPHLENS_DIR = ".graphlens"
 _DB_NAME = "graph.db"
+# Sidecar where semble persists its retrieval index, so a restart can reload it
+# without re-chunking the whole corpus (the embedding model is still needed for
+# queries; persistence only spares the corpus pass).
+_SEMBLE_INDEX_NAME = "semble-index"
+
+# Resume checkpoint for the (graph -> semantic -> clusters) index pipeline,
+# stored in the graph's own meta table. ``_PHASE_KEY`` records the last
+# completed stage; ``_HASH_KEY`` the file fingerprint it was completed for,
+# so a crash that interrupts the expensive tail (clustering) resumes instead
+# of re-running the whole index. See ARCHITECTURE.md §"semantic index resume".
+_PHASE_KEY = "index_phase"
+_HASH_KEY = "index_root_hash"
+_PHASE_INDEXING = "indexing"
+_PHASE_GRAPH = "graph"
+_PHASE_SEMANTIC = "semantic"
+_PHASE_DONE = "done"
 
 # Directories skipped when discovering source files on disk.
 _EXCLUDED_DIRS = frozenset(
@@ -122,6 +139,17 @@ class Workspace:
         # Serializes reindex_connected so a watcher re-index and an on-access
         # re-index of overlapping files cannot interleave read/prune/write.
         self._reindex_lock = asyncio.Lock()
+        # Optional semantic layer (search-by-meaning + clusters). Stays inert
+        # unless the [semantic] extra is installed; never blocks graph queries.
+        self.semantic = SemanticIndex(
+            project_root, project_root / _GRAPHLENS_DIR / _SEMBLE_INDEX_NAME
+        )
+        # Clusters are derived from the whole graph, so an incremental edit
+        # marks them stale and they recompute lazily on the next cluster query
+        # (recomputing per file save would be wasteful). Guarded by a lock so
+        # two concurrent cluster queries don't recompute at once.
+        self._clusters_dirty = True
+        self._cluster_lock = asyncio.Lock()
 
     @classmethod
     async def create(cls, project_root: Path, db_path: Path) -> Workspace:
@@ -227,7 +255,107 @@ class Workspace:
     # ------------------------------------------------------------------
 
     async def full_index(self) -> dict[str, Any]:
-        """Full re-index of the project. Returns stats dict."""
+        """
+        Full re-index: graph, then the optional semantic index and clusters.
+
+        Runs the three phases in order — graph (graphlens) → semantic
+        (semble) → clusters — recording a resume checkpoint after each in the
+        graph's ``meta`` table. A crash that interrupts the expensive tail
+        (clustering) can therefore resume via :meth:`resume_pending_index`
+        instead of re-running the whole index. The semantic phases are
+        best-effort: if the ``[semantic]`` extra is absent or the embedding
+        model cannot be fetched, the graph index still completes and the
+        checkpoint simply stops at the graph phase. Returns the graph stats.
+        """
+        await self.store.set_meta(_PHASE_KEY, _PHASE_INDEXING)
+        stats = await self._index_graph()
+        # Fingerprint the freshly-indexed file set, then mark the graph phase
+        # complete; the tail phases key their resume off this exact pair.
+        await self.store.set_meta(
+            _HASH_KEY, await self.store.files_fingerprint()
+        )
+        await self.store.set_meta(_PHASE_KEY, _PHASE_GRAPH)
+        await self._run_semantic_tail()
+        return stats
+
+    async def _run_semantic_tail(self) -> None:
+        """Build the semantic index then clusters, advancing the checkpoint."""
+        avail = await self.semantic.build()
+        if not avail.ok:
+            logger.info("Semantic phase skipped: %s", avail.reason)
+            return
+        await self.store.set_meta(_PHASE_KEY, _PHASE_SEMANTIC)
+        if await self._recompute_clusters():
+            await self.store.set_meta(_PHASE_KEY, _PHASE_DONE)
+
+    async def _recompute_clusters(self) -> bool:
+        """
+        Recompute and persist clusters from the current graph (best-effort).
+
+        Returns True if clusters were recomputed and stored. A False result
+        (extra missing, model unreachable, or too few nodes) is not an error:
+        the cluster tools then report the layer as unavailable rather than
+        crashing. Serialized so concurrent cluster queries recompute once.
+        """
+        async with self._cluster_lock:
+            nodes = await self.store.get_nodes_for_clustering()
+            computation = await self.semantic.compute_clusters(nodes)
+            if computation is None:
+                return False
+            await self.store.replace_clusters(
+                computation.clusters, computation.assignments
+            )
+            self._clusters_dirty = False
+            return True
+
+    async def ensure_clusters(self) -> bool:
+        """
+        Ensure clusters reflect the current graph; recompute if stale.
+
+        Called by the cluster tools before reading: the graph may have been
+        re-indexed since clusters were last computed (incremental edits mark
+        them dirty). Returns True if clusters are present and current.
+        """
+        if not self._clusters_dirty and await self.store.cluster_count() > 0:
+            return True
+        return await self._recompute_clusters()
+
+    async def resume_pending_index(self) -> None:
+        """
+        Finish an index whose expensive tail was interrupted by a crash.
+
+        Run at ``serve`` start after :meth:`reconcile`. If the last full
+        index completed the graph but died before clusters were written — and
+        the file fingerprint still matches — this resumes only the unfinished
+        tail rather than re-running everything. If the tree changed while the
+        server was down (fingerprint mismatch), :meth:`reconcile` has already
+        patched the graph, so the semantic index and clusters are merely
+        marked stale and rebuilt lazily on first query (a cheap startup with
+        no up-front model fetch).
+        """
+        phase = await self.store.get_meta(_PHASE_KEY)
+        if phase in (None, _PHASE_INDEXING):
+            # The graph index never completed; the normal index path owns it.
+            return
+        stored = await self.store.get_meta(_HASH_KEY)
+        current = await self.store.files_fingerprint()
+        if stored != current:
+            await self.store.set_meta(_HASH_KEY, current)
+            self.semantic.mark_dirty()
+            self._clusters_dirty = True
+            return
+        if phase == _PHASE_DONE:
+            return
+        if phase == _PHASE_GRAPH:
+            if not (await self.semantic.build()).ok:
+                return
+            await self.store.set_meta(_PHASE_KEY, _PHASE_SEMANTIC)
+            phase = _PHASE_SEMANTIC
+        if phase == _PHASE_SEMANTIC and await self._recompute_clusters():
+            await self.store.set_meta(_PHASE_KEY, _PHASE_DONE)
+
+    async def _index_graph(self) -> dict[str, Any]:
+        """Full graph re-index of the project. Returns stats dict."""
         languages = adapter_registry.available()
         report = doctor(self.project_root)
 
@@ -428,6 +556,11 @@ class Workspace:
 
             if reindexed:
                 await self._resynthesize_cross_language(reindexed)
+                # The watcher cannot patch semble's index or the clusters in
+                # place, so flag both stale; they rebuild lazily on the next
+                # semantic/cluster query rather than on every file save.
+                self.semantic.mark_dirty()
+                self._clusters_dirty = True
 
     async def _connected_set(
         self, changed_paths: set[str]
