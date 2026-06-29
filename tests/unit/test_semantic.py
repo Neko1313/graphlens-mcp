@@ -8,11 +8,9 @@ graceful-degradation and end-to-end clustering logic are testable offline.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-from graphlens_mcp.indexer import semantic as sem
 from graphlens_mcp.indexer.semantic import (
     SemanticIndex,
     _assemble_clusters,
