@@ -129,9 +129,19 @@ async def tool_search_symbols(
     """
     Search for symbols by name across the whole codebase.
 
-    Use this as the FIRST step when you need to find where a symbol is defined.
-    Returns node IDs you can pass to get_callees / get_callers / get_node_info.
-    The query supports FTS5 prefix syntax (e.g. ``create_order*``).
+    Returns node IDs for use with get_node_info / get_callers /
+    get_callees. Supports FTS5 prefix syntax (``create_order*``).
+
+    **Short or common names rank poorly** — dozens of imports and file
+    nodes share them. Use the most distinctive form available: a
+    compound name (``UserRepository``), a qualified path prefix
+    (``models.Location``), or a wildcard suffix (``OrderSvc*``). When
+    you know the file, ``get_file_structure`` is more reliable.
+
+    Nodes returned with ``file_path: null`` are external stubs (not
+    defined locally). Use ``get_file_structure`` on an importer to
+    find the real definition.  When you don't know the name at all,
+    use ``search_semantic`` instead.
     """
     rows = await store.search_symbols(query, limit=limit)
     refs, truncated = to_refs(rows, limit)
@@ -182,10 +192,17 @@ async def tool_get_file_structure(
     limit: int = 200,
 ) -> FileStructureResult:
     """
-    Return the symbol outline of a file (classes, functions, methods).
+    Return the symbol outline of a single file (classes, functions, methods).
 
-    Triggers on-access freshness check. Use this instead of reading the whole
-    file when you only need to understand its structure.
+    *path* must be a **file** path — passing a directory returns empty.
+    For directory-level exploration pass a qualified name prefix to
+    ``search_symbols`` (e.g. ``"authz."``), or use ``search_semantic``
+    for concept-level discovery.
+
+    Triggers on-access freshness check.  Prefer this over reading the
+    whole file when you only need its structure or want to reliably
+    get a node ID for a common name.  Nodes with ``file_path: null``
+    are external symbols resolved here but not defined locally.
     """
     abs_path = str(_resolve_in_project(workspace, path))
     status = await workspace.ensure_fresh(Path(abs_path))
@@ -345,14 +362,19 @@ async def tool_search_code(
     ignore_case: bool = False,
     limit: int = 100,
 ) -> CodeSearchResult:
-    """
-    Search file *content* by regex/text — the in-graph replacement for grep.
+    r"""
+    Search file *content* by regex — the in-graph replacement for grep.
 
-    Use this for what the graph cannot answer from symbol structure: string
-    literals, log/error messages, comments, TODOs, config values, or any
-    raw-text pattern. For "where is symbol X defined / who calls it", prefer
-    search_symbols + get_callers (precise, name-resolved). Honors .gitignore
-    and skips vendored/build dirs.
+    *pattern* is a PCRE regular expression (ripgrep).  Escape regex
+    metacharacters for literal searches — parentheses, brackets, dots,
+    ``*``, ``+`` must be escaped: ``foo\\(bar\\)``, ``os\\.path``.
+    Use *path_glob* to scope to a file subset (e.g. ``"*.py"``).
+
+    Use for: string literals, log/error messages, comments, TODOs,
+    config values, or raw-text patterns the symbol graph cannot answer.
+    For symbol-level questions ("where is X defined / who calls it?")
+    prefer ``search_symbols`` + ``get_callers`` — they are precise and
+    name-resolved.  Honors .gitignore; skips vendored/build dirs.
     """
     cap = min(limit, MAX_RESULTS)
     root = workspace.project_root
@@ -500,14 +522,17 @@ async def tool_search_semantic(
     limit: int = 10,
 ) -> SemanticResult:
     """
-    Search the codebase by *meaning*, not just name or text.
+    Search the codebase by *meaning* — the primary discovery tool.
 
-    Best when you don't know the exact symbol name: a natural-language
-    description ("retry an HTTP request with backoff") or a code-like query.
-    Each hit is a graph node — pass node_id straight to get_callers /
-    get_callees / get_node_info. Requires the [semantic] extra; if it is
-    unavailable the result says so (available=False) — fall back to
-    search_symbols / search_code.
+    Use when you don't know the symbol name: describe the behavior or
+    concept in natural language ("retry HTTP with backoff", "parse JWT
+    token", "validate user permissions"). Also effective for concept
+    names without a specific identifier ("authentication", "rate limit").
+
+    Each hit is a graph node — pass ``node_id`` directly to
+    ``get_callers`` / ``get_callees`` / ``get_node_info``.  When
+    ``available=False`` in the response, fall back to ``search_symbols``
+    + ``search_code``.
     """
     cap = min(limit, MAX_RESULTS)
     response = await workspace.semantic.search(store, query, top_k=cap)
