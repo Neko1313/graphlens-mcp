@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-06-29
+### Features
+
+- feat: semantic search, content search, and clusters by @Neko1313 in [#9](https://github.com/Neko1313/graphlens-mcp/pull/9)
+
+
+
+
+**Full Changelog**: https://github.com/Neko1313/graphlens-mcp/compare/v0.2.2...v0.3.0
 ## [0.2.2] - 2026-06-28
 ### Bug Fixes
 
