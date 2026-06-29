@@ -233,9 +233,7 @@ class SemanticIndex:
             if not nodes:
                 self._dirty = False
                 return Availability(ok=True)
-            embedding_rows = await asyncio.to_thread(
-                _embed_blocking, nodes
-            )
+            embedding_rows = await asyncio.to_thread(_embed_blocking, nodes)
             await store.store_embeddings(embedding_rows)
             # Reload in-memory cache immediately so the next search is fast.
             rows = await store.get_embedding_rows()

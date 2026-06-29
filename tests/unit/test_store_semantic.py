@@ -170,7 +170,9 @@ async def test_store_and_retrieve_embeddings(store):
 
     vec_a = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     vec_b = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    await store.store_embeddings([(a.id, vec_a.tobytes()), (b.id, vec_b.tobytes())])
+    await store.store_embeddings(
+        [(a.id, vec_a.tobytes()), (b.id, vec_b.tobytes())]
+    )
 
     rows = await store.get_embedding_rows()
     assert len(rows) == 2

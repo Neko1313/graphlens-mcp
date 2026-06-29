@@ -1052,9 +1052,7 @@ class SqliteStore:
     # Node embedding storage (model2vec float32 vectors)
     # ------------------------------------------------------------------
 
-    async def store_embeddings(
-        self, rows: list[tuple[str, bytes]]
-    ) -> None:
+    async def store_embeddings(self, rows: list[tuple[str, bytes]]) -> None:
         """
         Atomically replace all stored node embeddings.
 

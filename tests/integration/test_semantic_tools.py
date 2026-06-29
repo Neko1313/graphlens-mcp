@@ -94,7 +94,9 @@ async def test_search_semantic_unavailable_is_graceful(
         avail = await ws.semantic.build(ws.store)
         assert avail.ok is False
         # Subsequent search uses the sticky reason without re-trying the model.
-        result = await tool_search_semantic(ws.store, ws, "add one to a number")
+        result = await tool_search_semantic(
+            ws.store, ws, "add one to a number"
+        )
         assert result.available is False
         assert result.reason
         assert result.hits == []
@@ -102,9 +104,7 @@ async def test_search_semantic_unavailable_is_graceful(
         await ws.close()
 
 
-async def test_search_semantic_returns_nodes(
-    py_project: Path, monkeypatch
-):
+async def test_search_semantic_returns_nodes(py_project: Path, monkeypatch):
     """Hits are graph nodes directly — no chunk→node bridge needed."""
     model2vec = pytest.importorskip("model2vec")
     np = pytest.importorskip("numpy")

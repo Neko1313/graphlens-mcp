@@ -219,10 +219,18 @@ async def test_compute_clusters_end_to_end_with_fake_model(monkeypatch):
     monkeypatch.setattr(model2vec, "StaticModel", FakeModel)
 
     nodes = [
-        {"id": f"a{i}", "qualified_name": f"m.authLogin{i}", "metadata_json": None}
+        {
+            "id": f"a{i}",
+            "qualified_name": f"m.authLogin{i}",
+            "metadata_json": None,
+        }
         for i in range(4)
     ] + [
-        {"id": f"p{i}", "qualified_name": f"m.payCharge{i}", "metadata_json": None}
+        {
+            "id": f"p{i}",
+            "qualified_name": f"m.payCharge{i}",
+            "metadata_json": None,
+        }
         for i in range(4)
     ]
 
