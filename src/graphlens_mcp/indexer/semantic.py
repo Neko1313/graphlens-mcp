@@ -633,7 +633,8 @@ def _assemble_clusters(
 
     clusters: list[dict[str, Any]] = []
     assignments: list[dict[str, Any]] = []
-    ordered: list[list[int]] = sorted(by_label.values(), key=len, reverse=True)
+    ordered: list[list[int]] = list(by_label.values())
+    ordered.sort(key=len, reverse=True)
     for new_id, members in enumerate(ordered, start=1):
         names = [
             nodes[i].get("qualified_name") or nodes[i].get("name") or ""
