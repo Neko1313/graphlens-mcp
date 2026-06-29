@@ -69,10 +69,6 @@ logger = logging.getLogger(__name__)
 
 _GRAPHLENS_DIR = ".graphlens"
 _DB_NAME = "graph.db"
-# Sidecar where semble persists its retrieval index, so a restart can reload it
-# without re-chunking the whole corpus (the embedding model is still needed for
-# queries; persistence only spares the corpus pass).
-_SEMBLE_INDEX_NAME = "semble-index"
 
 # Resume checkpoint for the (graph -> semantic -> clusters) index pipeline,
 # stored in the graph's own meta table. ``_PHASE_KEY`` records the last
@@ -141,9 +137,7 @@ class Workspace:
         self._reindex_lock = asyncio.Lock()
         # Optional semantic layer (search-by-meaning + clusters). Stays inert
         # unless the [semantic] extra is installed; never blocks graph queries.
-        self.semantic = SemanticIndex(
-            project_root, project_root / _GRAPHLENS_DIR / _SEMBLE_INDEX_NAME
-        )
+        self.semantic = SemanticIndex()
         # Clusters are derived from the whole graph, so an incremental edit
         # marks them stale and they recompute lazily on the next cluster query
         # (recomputing per file save would be wasteful). Guarded by a lock so
@@ -279,8 +273,8 @@ class Workspace:
         return stats
 
     async def _run_semantic_tail(self) -> None:
-        """Build the semantic index then clusters, advancing the checkpoint."""
-        avail = await self.semantic.build()
+        """Embed nodes then cluster, advancing the checkpoint."""
+        avail = await self.semantic.build(self.store)
         if not avail.ok:
             logger.info("Semantic phase skipped: %s", avail.reason)
             return
@@ -298,8 +292,7 @@ class Workspace:
         crashing. Serialized so concurrent cluster queries recompute once.
         """
         async with self._cluster_lock:
-            nodes = await self.store.get_nodes_for_clustering()
-            computation = await self.semantic.compute_clusters(nodes)
+            computation = await self.semantic.compute_clusters(self.store)
             if computation is None:
                 return False
             await self.store.replace_clusters(
@@ -347,7 +340,7 @@ class Workspace:
         if phase == _PHASE_DONE:
             return
         if phase == _PHASE_GRAPH:
-            if not (await self.semantic.build()).ok:
+            if not (await self.semantic.build(self.store)).ok:
                 return
             await self.store.set_meta(_PHASE_KEY, _PHASE_SEMANTIC)
             phase = _PHASE_SEMANTIC
@@ -556,9 +549,9 @@ class Workspace:
 
             if reindexed:
                 await self._resynthesize_cross_language(reindexed)
-                # The watcher cannot patch semble's index or the clusters in
-                # place, so flag both stale; they rebuild lazily on the next
-                # semantic/cluster query rather than on every file save.
+                # Flag both the vector cache and clusters stale so they
+                # reload/recompute lazily on the next query rather than on
+                # every file save (embedding is too slow to do per-save).
                 self.semantic.mark_dirty()
                 self._clusters_dirty = True
 

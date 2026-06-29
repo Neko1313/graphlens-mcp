@@ -99,20 +99,18 @@ class CodeSearchResult(BaseModel):
 
 class SemanticHit(BaseModel):
     """
-    A semantic search hit: a code chunk plus the graph nodes it overlaps.
+    A semantic search hit: a graph node matched by meaning.
 
-    ``nodes`` is the bridge back into the graph — pass a node id straight to
-    get_callers / get_callees / get_node_info to go from "found by meaning"
-    to "understand its structure".
+    Each hit IS a graph node — pass ``node_id`` directly to
+    get_callers / get_callees / get_node_info to pivot into the graph.
     """
 
-    file_path: str
-    start_line: int
-    end_line: int
+    node_id: str
+    kind: str
+    name: str
+    qualified_name: str
+    file_path: str | None = None
     score: float
-    content: str
-    language: str | None = None
-    nodes: list[NodeRef] = Field(default_factory=list)
 
 
 class SemanticResult(BaseModel):

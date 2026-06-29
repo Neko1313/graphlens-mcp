@@ -54,12 +54,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   node_id UNINDEXED
 );
 
+-- Node embeddings: float32 vectors produced by model2vec (potion-code-16M),
+-- stored as raw bytes (tobytes()) for fast in-process cosine similarity search.
+-- A full index writes all embeddings; an incremental edit marks the in-memory
+-- cache stale (reloaded lazily on next search from these rows). No foreign key
+-- to nodes(id) — the same dangling-tolerance reason as edges.
+CREATE TABLE IF NOT EXISTS node_embeddings (
+  node_id TEXT PRIMARY KEY,
+  vector  BLOB NOT NULL
+);
+
 -- Semantic clusters: groups of semantically-related symbols, recomputed from
 -- node embeddings during a full index (see indexer/semantic.py). Like the rest
 -- of the graph this is a regenerable cache — a schema change drops and rebuilds
 -- it rather than migrating, and an incremental edit marks it stale (recomputed
--- lazily on the next cluster query). The semble retrieval index itself is NOT
--- stored here: it lives in a sidecar file written by semble's own save().
+-- lazily on the next cluster query).
 CREATE TABLE IF NOT EXISTS clusters (
   id     INTEGER PRIMARY KEY,
   label  TEXT NOT NULL,       -- short human label derived from member symbols

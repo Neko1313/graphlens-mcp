@@ -27,10 +27,11 @@ _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 # rather than migrating it (see ARCHITECTURE.md). The stored fingerprint
 # also folds in graphlens' own model SCHEMA_VERSION, so a core model
 # change invalidates the cache too.
-LOCAL_SCHEMA_VERSION = 4
+LOCAL_SCHEMA_VERSION = 5
 
 _ALL_TABLES = (
     "nodes_fts",
+    "node_embeddings",
     "node_clusters",
     "clusters",
     "edges",
@@ -700,6 +701,7 @@ class SqliteStore:
         async with self._writing():
             for table in (
                 "nodes_fts",
+                "node_embeddings",
                 "node_clusters",
                 "clusters",
                 "edges",
@@ -1041,6 +1043,50 @@ class SqliteStore:
         WHERE file_path IS NOT NULL
           AND kind IN ('function', 'method', 'class')
         ORDER BY id
+        """
+        async with self._read_conn.execute(sql) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Node embedding storage (model2vec float32 vectors)
+    # ------------------------------------------------------------------
+
+    async def store_embeddings(
+        self, rows: list[tuple[str, bytes]]
+    ) -> None:
+        """
+        Atomically replace all stored node embeddings.
+
+        *rows* is a list of ``(node_id, float32_bytes)`` pairs where the
+        bytes are the raw output of ``np.ndarray.tobytes()`` on a
+        unit-normalised float32 row vector. Wiping and reinserting under one
+        write keeps the embedding table consistent with a full re-encode.
+        """
+        async with self._writing():
+            await self._conn.execute("DELETE FROM node_embeddings")
+            for node_id, vec_bytes in rows:
+                await self._conn.execute(
+                    "INSERT INTO node_embeddings(node_id, vector) "
+                    "VALUES(?, ?)",
+                    (node_id, vec_bytes),
+                )
+
+    async def get_embedding_rows(self) -> list[dict[str, Any]]:
+        """
+        Return all stored embeddings joined with their node metadata.
+
+        Each row carries ``node_id``, ``vector`` (raw bytes), ``kind``,
+        ``name``, ``qualified_name``, and ``file_path``. The JOIN filters
+        out dangling rows whose node was deleted since the last full index.
+        Ordered by ``node_id`` for a stable, reproducible matrix layout.
+        """
+        sql = """
+        SELECT ne.node_id, ne.vector,
+               n.kind, n.name, n.qualified_name, n.file_path
+        FROM node_embeddings ne
+        JOIN nodes n ON n.id = ne.node_id
+        ORDER BY ne.node_id
         """
         async with self._read_conn.execute(sql) as cur:
             rows = await cur.fetchall()

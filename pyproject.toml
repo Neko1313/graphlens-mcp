@@ -23,8 +23,8 @@ graphlens-mcp = "graphlens_mcp.cli:main"
 
 [project.optional-dependencies]
 semantic = [
+    "model2vec>=0.4",
     "scikit-learn>=1.3",
-    "semble>=0.4",
 ]
 
 [build-system]

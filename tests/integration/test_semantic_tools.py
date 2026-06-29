@@ -31,30 +31,12 @@ async def _workspace(root: Path) -> Workspace:
     return ws
 
 
-class _FakeIndex:
-    """A stand-in for semble's index: no model, deterministic, save is a no-op."""
-
-    def __init__(self, hits=None):
-        self._hits = hits or []
-
-    def save(self, _path):
-        pass
-
-    def search(self, _query, **_kw):
-        return self._hits
-
-    def find_related(self, _source, **_kw):
-        return self._hits
-
-
 # ---- search_code (grep replacement) --------------------------------------
 
 
 async def test_search_code_finds_string_literal(py_project: Path):
     ws = await _workspace(py_project)
     try:
-        # A literal that lives inside a function body — invisible to symbol
-        # search, the exact case search_code exists for.
         (py_project / "pkg" / "c.py").write_text(
             'MARKER = "needle-in-haystack"\n'
         )
@@ -91,25 +73,28 @@ async def test_search_code_reports_invalid_pattern(py_project: Path):
         await ws.close()
 
 
-# ---- semantic search / find_related --------------------------------------
+# ---- semantic search (node-based, no chunk bridge) -----------------------
 
 
 async def test_search_semantic_unavailable_is_graceful(
     py_project: Path, monkeypatch
 ):
-    semble = pytest.importorskip("semble")
+    model2vec = pytest.importorskip("model2vec")
 
     def boom(*_a, **_k):
         msg = "ProxyError 403 Forbidden fetching model"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(semble.SembleIndex, "from_path", boom)
+    monkeypatch.setattr(model2vec.StaticModel, "from_pretrained", boom)
     ws = await Workspace.create(py_project, default_db_path(py_project))
     await ws._index_graph()
+    # Build the graph nodes first so build() has something to embed, then
+    # try to build the semantic index (which will fail at model load).
     try:
-        result = await tool_search_semantic(
-            ws.store, ws, "add one to a number"
-        )
+        avail = await ws.semantic.build(ws.store)
+        assert avail.ok is False
+        # Subsequent search uses the sticky reason without re-trying the model.
+        result = await tool_search_semantic(ws.store, ws, "add one to a number")
         assert result.available is False
         assert result.reason
         assert result.hits == []
@@ -117,42 +102,35 @@ async def test_search_semantic_unavailable_is_graceful(
         await ws.close()
 
 
-async def test_search_semantic_bridges_hits_to_nodes(
+async def test_search_semantic_returns_nodes(
     py_project: Path, monkeypatch
 ):
-    semble = pytest.importorskip("semble")
+    """Hits are graph nodes directly — no chunk→node bridge needed."""
+    model2vec = pytest.importorskip("model2vec")
+    np = pytest.importorskip("numpy")
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(_id):
+            return FakeModel()
+
+        def encode(self, texts):
+            # All identical unit vectors — every node scores equally.
+            return np.ones((len(texts), 3), dtype=np.float32)
+
+    monkeypatch.setattr(model2vec, "StaticModel", FakeModel)
     ws = await Workspace.create(py_project, default_db_path(py_project))
     await ws._index_graph()
     try:
-        # A hit pointing at helper's source span should bridge to the graph
-        # node for helper, so the agent can pivot into get_callers/get_callees.
-        helper_file = str((py_project / "pkg" / "a.py").resolve())
-
-        class Hit:
-            chunk = type(
-                "C",
-                (),
-                {
-                    "content": "def helper(x):\n    return x + 1",
-                    "file_path": helper_file,
-                    "start_line": 1,
-                    "end_line": 2,
-                    "language": "python",
-                },
-            )()
-            score = 0.99
-
-        monkeypatch.setattr(
-            semble.SembleIndex,
-            "from_path",
-            lambda *_a, **_k: _FakeIndex([Hit()]),
-        )
+        await ws.semantic.build(ws.store)
         result = await tool_search_semantic(ws.store, ws, "increment")
         assert result.available is True
-        assert result.count == 1
+        assert result.count >= 1
         hit = result.hits[0]
-        assert hit.file_path == helper_file
-        assert any(n.name == "helper" for n in hit.nodes)
+        # Each hit is a node — node_id, kind, name are all present.
+        assert hit.node_id
+        assert hit.kind in ("function", "method", "class")
+        assert hit.name
     finally:
         await ws.close()
 
@@ -162,6 +140,38 @@ async def test_find_related_unknown_node(py_project: Path):
     try:
         result = await tool_find_related(ws.store, ws, "no-such-node")
         assert result.error is not None
+    finally:
+        await ws.close()
+
+
+async def test_find_related_returns_similar_nodes(
+    py_project: Path, monkeypatch
+):
+    model2vec = pytest.importorskip("model2vec")
+    np = pytest.importorskip("numpy")
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(_id):
+            return FakeModel()
+
+        def encode(self, texts):
+            return np.ones((len(texts), 3), dtype=np.float32)
+
+    monkeypatch.setattr(model2vec, "StaticModel", FakeModel)
+    ws = await Workspace.create(py_project, default_db_path(py_project))
+    await ws._index_graph()
+    try:
+        await ws.semantic.build(ws.store)
+        # Pick any indexed node as source.
+        rows = await ws.store.get_nodes_for_clustering()
+        if not rows:
+            pytest.skip("No indexable nodes in fixture project")
+        source_id = rows[0]["id"]
+        result = await tool_find_related(ws.store, ws, source_id)
+        assert result.available is True
+        # Hits should not include the source node itself.
+        assert all(h.node_id != source_id for h in result.hits)
     finally:
         await ws.close()
 
@@ -192,13 +202,13 @@ async def test_list_clusters_unavailable_is_graceful(
 async def test_full_index_checkpoint_stops_at_graph_when_model_blocked(
     py_project: Path, monkeypatch
 ):
-    semble = pytest.importorskip("semble")
+    model2vec = pytest.importorskip("model2vec")
 
     def boom(*_a, **_k):
         msg = "ProxyError 403 Forbidden fetching model"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(semble.SembleIndex, "from_path", boom)
+    monkeypatch.setattr(model2vec.StaticModel, "from_pretrained", boom)
     ws = await Workspace.create(py_project, default_db_path(py_project))
     try:
         await ws.full_index()
@@ -216,13 +226,9 @@ async def test_full_index_checkpoint_stops_at_graph_when_model_blocked(
 async def test_full_index_completes_pipeline_with_fake_model(
     py_project: Path, monkeypatch
 ):
-    semble = pytest.importorskip("semble")
+    model2vec = pytest.importorskip("model2vec")
     np = pytest.importorskip("numpy")
-    import model2vec
-
-    monkeypatch.setattr(
-        semble.SembleIndex, "from_path", lambda *_a, **_k: _FakeIndex()
-    )
+    import sklearn  # noqa: F401 — ensure the extra is installed
 
     class FakeModel:
         @staticmethod

@@ -155,3 +155,55 @@ async def test_public_meta_get_set(store):
     assert await store.get_meta("k") == "v"
     await store.set_meta("k", "v2")
     assert await store.get_meta("k") == "v2"
+
+
+# ---- embedding storage ---------------------------------------------------
+
+
+async def test_store_and_retrieve_embeddings(store):
+    """store_embeddings persists raw bytes; get_embedding_rows joins nodes."""
+    np = pytest.importorskip("numpy")
+
+    a = node_with_span("m.fn_a", 1, 5)
+    b = node_with_span("m.fn_b", 6, 10)
+    await _apply(store, [a, b])
+
+    vec_a = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    vec_b = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    await store.store_embeddings([(a.id, vec_a.tobytes()), (b.id, vec_b.tobytes())])
+
+    rows = await store.get_embedding_rows()
+    assert len(rows) == 2
+    # Rows ordered by node_id; verify round-trip fidelity.
+    by_id = {r["node_id"]: r for r in rows}
+    assert a.id in by_id and b.id in by_id
+    recovered = np.frombuffer(bytes(by_id[a.id]["vector"]), dtype=np.float32)
+    assert np.allclose(recovered, vec_a)
+    # Node metadata is joined in.
+    assert by_id[a.id]["qualified_name"] == "m.fn_a"
+
+
+async def test_store_embeddings_replaces_previous(store):
+    """Calling store_embeddings again wipes and replaces the old set."""
+    np = pytest.importorskip("numpy")
+
+    a = node_with_span("m.fn_a", 1, 5)
+    await _apply(store, [a])
+
+    vec = np.array([1.0, 0.0], dtype=np.float32)
+    await store.store_embeddings([(a.id, vec.tobytes())])
+    await store.store_embeddings([])  # replace with empty
+    assert await store.get_embedding_rows() == []
+
+
+async def test_get_embedding_rows_filters_dangling(store):
+    """Embeddings for deleted nodes are excluded (JOIN with nodes)."""
+    np = pytest.importorskip("numpy")
+
+    a = node_with_span("m.fn_a", 1, 5)
+    await _apply(store, [a])
+    vec = np.array([1.0, 0.0], dtype=np.float32)
+    await store.store_embeddings([(a.id, vec.tobytes())])
+
+    await store.delete_file(FILE)
+    assert await store.get_embedding_rows() == []

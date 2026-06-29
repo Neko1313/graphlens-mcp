@@ -1,26 +1,17 @@
 """
 Semantic retrieval and clustering over the code graph.
 
-This is the optional ``[semantic]`` layer that lets an agent search the
-codebase *by meaning* (not just by symbol name or text) and navigate its
-semantic neighborhoods — the capabilities that otherwise push agents back
-to ``grep``. It is built on two pieces, both pulled in only by the
-``semantic`` extra so a base install stays dependency-light:
+Embeds graph *nodes* (function/method/class) directly with the model2vec
+static model and stores the float32 vectors in SQLite.  Semantic search and
+find_related do in-process cosine-similarity over a cached vector matrix —
+no file chunking, no external retrieval service, no chunk→node bridge.
+Each search hit is already a graph node, so the result pivots straight into
+get_callers/get_callees without extra indirection.
 
-* **semble** — a static-embedding + BM25 hybrid retriever. We wrap its
-  index so a semantic hit (a file + line range) can be bridged back to the
-  graph's *node ids* (see :meth:`SqliteStore.nodes_overlapping`), letting a
-  "found by meaning" result pivot straight into ``get_callers`` /
-  ``get_callees``.
-* **model2vec + scikit-learn** — we embed each symbol node and cluster the
-  vectors (HDBSCAN) into labeled semantic zones ("auth", "serialization",
-  …), something semble itself does not provide.
-
-Every heavy import is lazy and guarded. Importing this module never fails
-on a base install; instead :func:`semantic_availability` reports *why* the
-layer is off (extra not installed) and a build/query reports at runtime if
-the embedding model cannot be fetched (offline, blocked egress, no token),
-so the core graph server keeps working regardless.
+Every heavy import (model2vec, numpy, sklearn) is lazy and guarded so a
+base install stays dependency-light.  :func:`semantic_availability` reports
+whether the optional ``[semantic]`` extra is present, and build/query
+degrade gracefully when the embedding model cannot be fetched.
 """
 
 from __future__ import annotations
@@ -35,29 +26,21 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
+    from graphlens_mcp.store.sqlite_store import SqliteStore
 
 logger = logging.getLogger(__name__)
 
-# The code-specialized static embedding model semble uses; reused here for
-# node clustering so search and clusters share one vector space (and one
-# downloaded/cached model).
 MODEL_ID = "minishlab/potion-code-16M"
 
-# Clustering knobs. HDBSCAN leaves sparse nodes unclustered (label -1); only
-# dense semantic zones become clusters, which is what we want for a navigation
-# map rather than forcing every symbol into a bucket.
 _MIN_CLUSTER_SIZE = 3
 _MAX_LABEL_TERMS = 4
-# Above this node count, embedding+clustering the whole graph is skipped unless
-# explicitly forced — keeps a one-shot full index from stalling on a huge repo.
+# Above this node count, clustering is skipped — keeps a one-shot full index
+# from stalling on a huge repo.
 _MAX_CLUSTER_NODES = 50_000
 
-# Metadata keys graphlens adapters attach to a definition (mirror tools.py).
 _SIGNATURE_KEYS = ("signature", "sig")
 _DOCSTRING_KEYS = ("docstring", "doc", "documentation")
 
-# Generic identifier tokens that make for useless cluster labels.
 _LABEL_STOPWORDS = frozenset(
     {
         "get",
@@ -102,14 +85,14 @@ class Availability:
 
 @dataclass(frozen=True)
 class SemanticHit:
-    """One semantic search hit: a code chunk plus its relevance score."""
+    """One search hit: a graph node with a similarity score."""
 
-    file_path: str
-    start_line: int
-    end_line: int
-    content: str
+    node_id: str
+    kind: str
+    name: str
+    qualified_name: str
+    file_path: str | None
     score: float
-    language: str | None = None
 
 
 @dataclass(frozen=True)
@@ -137,14 +120,14 @@ _INSTALL_HINT = (
 
 def semantic_availability() -> Availability:
     """
-    Report whether the ``[semantic]`` extra is importable.
+    Report whether the ``[semantic]`` extra (model2vec + sklearn) is importable.
 
     Checks only that the heavy packages import — not that the embedding
     model can be fetched, which is discovered (and reported) at build/query
     time, since it depends on runtime network/egress.
     """
     try:
-        import semble  # noqa: F401, PLC0415
+        import model2vec  # noqa: F401, PLC0415
         import sklearn  # noqa: F401, PLC0415
     except ImportError:
         return Availability(ok=False, reason=_INSTALL_HINT)
@@ -154,23 +137,25 @@ def semantic_availability() -> Availability:
 def _is_network_error(exc: BaseException) -> bool:
     """Tell whether a model fetch failed for a network/egress reason."""
     text = f"{type(exc).__name__}: {exc}".lower()
-    needles = (
-        "proxy",
-        "connection",
-        "timed out",
-        "timeout",
-        "403",
-        "407",
-        "ssl",
-        "certificate",
-        "network",
-        "resolve",
-        "offline",
-        "could not download",
-        "failed to fetch",
-        "huggingface",
+    return any(
+        n in text
+        for n in (
+            "proxy",
+            "connection",
+            "timed out",
+            "timeout",
+            "403",
+            "407",
+            "ssl",
+            "certificate",
+            "network",
+            "resolve",
+            "offline",
+            "could not download",
+            "failed to fetch",
+            "huggingface",
+        )
     )
-    return any(n in text for n in needles)
 
 
 def _model_error_reason(exc: BaseException) -> str:
@@ -188,36 +173,37 @@ def _model_error_reason(exc: BaseException) -> str:
 
 class SemanticIndex:
     """
-    Lazy owner of the semble retrieval index for one project root.
+    Owns the node embedding cache for one project.
 
-    The index is built on first use and persisted to a sidecar under
-    ``.graphlens`` so a restart can reload it without re-chunking the whole
-    corpus. Incremental edits flip a dirty flag (the watcher cannot patch
-    semble's index in place), so the next query rebuilds from the current
-    tree. All blocking work (build, embed, cluster) is run off the event
-    loop. When the extra is missing or the model is unreachable the index
-    stays unavailable and every query returns a structured reason rather
-    than raising.
+    :meth:`build` embeds all graph nodes with model2vec and persists the
+    float32 vectors to SQLite (via :meth:`SqliteStore.store_embeddings`).
+    Search and find_related do in-process cosine-similarity over a cached
+    vector matrix loaded from the store on first use and reloaded after
+    incremental edits via :meth:`mark_dirty`.
+
+    All blocking work (model load, encode, cluster) runs off the event loop
+    in a thread pool.  When the extra is missing or the model is unreachable
+    every method returns a structured reason rather than raising.
     """
 
-    def __init__(self, project_root: Path, sidecar_path: Path) -> None:
-        """Bind to *project_root*; persist the index at *sidecar_path*."""
-        self._root = project_root
-        self._sidecar = sidecar_path
-        self._index: Any = None
+    def __init__(self) -> None:
         self._dirty = True
         self._lock = asyncio.Lock()
-        # Sticky reason once the model proves unreachable, so we don't retry
-        # a slow/blocked fetch on every single query within a session.
+        # Sticky reason once the model proves unreachable — avoids retrying a
+        # slow/blocked fetch on every query within a session.
         self._runtime_reason: str | None = None
+        # In-memory vector cache (rebuilt lazily from the store).
+        self._vectors: Any = None  # np.ndarray (N, D), unit-normalised
+        self._node_ids: list[str] = []
+        self._node_meta: list[dict[str, Any]] = []
 
     def mark_dirty(self) -> None:
-        """Flag the index stale so the next query rebuilds it."""
+        """Invalidate the cache so the next query reloads from the store."""
         self._dirty = True
 
     @property
     def availability(self) -> Availability:
-        """Import-level availability (the extra installed?)."""
+        """Import-level availability (extra installed?) plus any runtime error."""
         base = semantic_availability()
         if not base.ok:
             return base
@@ -226,216 +212,336 @@ class SemanticIndex:
         return Availability(ok=True)
 
     # ------------------------------------------------------------------
-    # Build / load
+    # Build — embed all nodes, persist to SQLite
     # ------------------------------------------------------------------
 
-    async def _ensure_index(self) -> Availability:
-        """Build or reload the semble index if needed; return availability."""
+    async def build(self, store: SqliteStore) -> Availability:
+        """
+        Embed all indexable nodes and write float32 vectors to the store.
+
+        Called by the full-index pipeline.  On success reloads the in-memory
+        cache so the next search is immediate.  Returns availability so the
+        pipeline can checkpoint whether the semantic phase completed.
+        """
+        base = semantic_availability()
+        if not base.ok:
+            return base
+        self._runtime_reason = None
+        try:
+            nodes = await store.get_nodes_for_clustering()
+            if not nodes:
+                self._dirty = False
+                return Availability(ok=True)
+            embedding_rows = await asyncio.to_thread(
+                _embed_blocking, nodes
+            )
+            await store.store_embeddings(embedding_rows)
+            # Reload in-memory cache immediately so the next search is fast.
+            rows = await store.get_embedding_rows()
+            if rows:
+                await asyncio.to_thread(self._load_blocking, rows)
+            self._dirty = False
+            return Availability(ok=True)
+        except Exception as exc:
+            reason = _model_error_reason(exc)
+            logger.warning("Semantic build failed: %s", reason)
+            self._runtime_reason = reason
+            return Availability(ok=False, reason=reason)
+
+    # ------------------------------------------------------------------
+    # Vector cache management
+    # ------------------------------------------------------------------
+
+    async def _ensure_vectors(self, store: SqliteStore) -> Availability:
+        """Load (or reload) the in-memory vector cache from the store."""
         base = semantic_availability()
         if not base.ok:
             return base
         if self._runtime_reason is not None:
             return Availability(ok=False, reason=self._runtime_reason)
-        if self._index is not None and not self._dirty:
+        if not self._dirty and self._vectors is not None:
             return Availability(ok=True)
 
         async with self._lock:
-            # Re-check under the lock: a concurrent caller may have built it.
-            if self._index is not None and not self._dirty:
+            # Re-check under the lock: a concurrent caller may have loaded it.
+            if not self._dirty and self._vectors is not None:
                 return Availability(ok=True)
             try:
-                index = await asyncio.to_thread(self._build_or_load_blocking)
+                rows = await store.get_embedding_rows()
+                await asyncio.to_thread(self._load_blocking, rows)
+                self._dirty = False
+                return Availability(ok=True)
             except Exception as exc:
                 reason = _model_error_reason(exc)
-                logger.warning("Semantic index build failed: %s", reason)
+                logger.warning("Vector cache load failed: %s", reason)
                 self._runtime_reason = reason
                 return Availability(ok=False, reason=reason)
-            self._index = index
-            self._dirty = False
-            return Availability(ok=True)
 
-    def _build_or_load_blocking(self) -> Any:
-        """Build the index from the tree (blocking); persist best-effort."""
-        from semble import ContentType, SembleIndex  # noqa: PLC0415
+    def _load_blocking(self, rows: list[dict[str, Any]]) -> None:
+        """Deserialize stored bytes into the in-memory numpy cache (blocking)."""
+        import numpy as np  # noqa: PLC0415
 
-        # A dirty rebuild must reflect the current tree, so build fresh rather
-        # than trusting a stale sidecar. A clean cold start may reload it.
-        if not self._dirty and self._sidecar.exists():
-            try:
-                return SembleIndex.load_from_disk(self._sidecar)
-            except Exception as exc:
-                logger.debug("Sidecar reload failed, rebuilding: %s", exc)
+        if not rows:
+            self._node_ids = []
+            self._node_meta = []
+            self._vectors = np.empty((0, 0), dtype=np.float32)
+            return
 
-        index = SembleIndex.from_path(self._root, content=(ContentType.CODE,))
-        # Persistence is an optimization, never load-bearing.
-        try:
-            self._sidecar.parent.mkdir(parents=True, exist_ok=True)
-            index.save(self._sidecar)
-        except Exception as exc:
-            logger.debug("Sidecar save failed (non-fatal): %s", exc)
-        return index
-
-    async def build(self) -> Availability:
-        """
-        Eagerly (re)build the index — called by the full-index pipeline.
-
-        Returns availability so the pipeline can record whether the
-        semantic phase actually completed (vs. degraded offline).
-        """
-        self._dirty = True
-        self._runtime_reason = None
-        return await self._ensure_index()
+        first = np.frombuffer(bytes(rows[0]["vector"]), dtype=np.float32)
+        dim = len(first)
+        mat = np.empty((len(rows), dim), dtype=np.float32)
+        mat[0] = first
+        ids: list[str] = [rows[0]["node_id"]]
+        meta: list[dict[str, Any]] = [_row_meta(rows[0])]
+        for i, r in enumerate(rows[1:], start=1):
+            mat[i] = np.frombuffer(bytes(r["vector"]), dtype=np.float32)
+            ids.append(r["node_id"])
+            meta.append(_row_meta(r))
+        self._node_ids = ids
+        self._node_meta = meta
+        self._vectors = mat
 
     # ------------------------------------------------------------------
-    # Queries
+    # Search by query string
     # ------------------------------------------------------------------
 
     async def search(
         self,
+        store: SqliteStore,
         query: str,
         top_k: int,
-        *,
-        filter_paths: list[str] | None = None,
-        max_snippet_lines: int | None = None,
     ) -> SemanticResponse:
-        """Run a semantic+lexical search; return hits or a reason."""
-        avail = await self._ensure_index()
+        """Embed *query* and return the top_k most similar graph nodes."""
+        avail = await self._ensure_vectors(store)
         if not avail.ok:
             return SemanticResponse(available=False, reason=avail.reason)
+        if not self._node_ids:
+            return SemanticResponse(available=True, hits=[])
+
+        # Snapshot local references for thread-safety: mark_dirty() may be
+        # called from the event loop while _search_blocking runs in a thread.
+        vectors = self._vectors
+        node_ids = self._node_ids
+        node_meta = self._node_meta
         try:
-            results = await asyncio.to_thread(
-                lambda: self._index.search(
-                    query,
-                    top_k=top_k,
-                    filter_paths=filter_paths,
-                    max_snippet_lines=max_snippet_lines,
-                )
+            hits = await asyncio.to_thread(
+                _search_blocking, query, top_k, vectors, node_ids, node_meta
             )
         except Exception as exc:
             reason = _model_error_reason(exc)
             logger.warning("Semantic search failed: %s", reason)
             return SemanticResponse(available=False, reason=reason)
-        return SemanticResponse(
-            available=True, hits=[_to_hit(r) for r in results]
-        )
+        return SemanticResponse(available=True, hits=hits)
+
+    # ------------------------------------------------------------------
+    # Find related (by node id)
+    # ------------------------------------------------------------------
 
     async def find_related(
         self,
-        *,
-        file_path: str,
-        start_line: int,
-        end_line: int,
-        content: str,
-        language: str | None,
+        store: SqliteStore,
+        node_id: str,
         top_k: int,
-        max_snippet_lines: int | None = None,
     ) -> SemanticResponse:
-        """Find chunks semantically similar to a given code span."""
-        avail = await self._ensure_index()
+        """Return the top_k graph nodes most similar to *node_id*."""
+        avail = await self._ensure_vectors(store)
         if not avail.ok:
             return SemanticResponse(available=False, reason=avail.reason)
-        try:
-            from semble import Chunk  # noqa: PLC0415
+        if not self._node_ids:
+            return SemanticResponse(available=True, hits=[])
 
-            source = Chunk(
-                content=content,
-                file_path=file_path,
-                start_line=start_line,
-                end_line=end_line,
-                language=language,
+        vectors = self._vectors
+        node_ids = self._node_ids
+        node_meta = self._node_meta
+        try:
+            source_idx = node_ids.index(node_id)
+        except ValueError:
+            return SemanticResponse(
+                available=False,
+                reason=f"Node {node_id!r} has no stored embedding.",
             )
-            results = await asyncio.to_thread(
-                lambda: self._index.find_related(
-                    source,
-                    top_k=top_k,
-                    max_snippet_lines=max_snippet_lines,
-                )
+        try:
+            hits = await asyncio.to_thread(
+                _find_related_blocking,
+                source_idx,
+                top_k,
+                vectors,
+                node_ids,
+                node_meta,
             )
         except Exception as exc:
             reason = _model_error_reason(exc)
             logger.warning("find_related failed: %s", reason)
             return SemanticResponse(available=False, reason=reason)
-        return SemanticResponse(
-            available=True, hits=[_to_hit(r) for r in results]
-        )
+        return SemanticResponse(available=True, hits=hits)
 
     # ------------------------------------------------------------------
     # Clustering
     # ------------------------------------------------------------------
 
     async def compute_clusters(
-        self, nodes: list[dict[str, Any]]
+        self, store: SqliteStore
     ) -> ClusterComputation | None:
         """
-        Embed *nodes* and cluster them into labeled semantic zones.
+        Cluster the stored node vectors using HDBSCAN.
 
-        Returns None when the layer is unavailable (extra missing or model
-        unreachable) or there is nothing to cluster, so the caller can skip
-        the cluster phase without treating it as a hard failure. Runs off
-        the event loop; the heavy numeric work is delegated to
-        :func:`_cluster_blocking`.
+        Returns None when the layer is unavailable or there are too few
+        nodes, so the caller can skip the cluster phase without treating it
+        as a hard failure.
         """
         if not semantic_availability().ok:
             return None
-        usable = [n for n in nodes if n.get("id")]
-        if len(usable) < _MIN_CLUSTER_SIZE:
+        avail = await self._ensure_vectors(store)
+        if not avail.ok:
             return None
-        if len(usable) > _MAX_CLUSTER_NODES:
+        if not self._node_ids or len(self._node_ids) < _MIN_CLUSTER_SIZE:
+            return None
+        if len(self._node_ids) > _MAX_CLUSTER_NODES:
             logger.warning(
                 "Skipping clustering: %d nodes exceeds cap %d",
-                len(usable),
+                len(self._node_ids),
                 _MAX_CLUSTER_NODES,
             )
             return None
+
+        vectors = self._vectors
+        node_ids = list(self._node_ids)
+        node_meta = list(self._node_meta)
         try:
-            return await asyncio.to_thread(self._cluster_blocking, usable)
+            return await asyncio.to_thread(
+                _cluster_blocking, node_ids, node_meta, vectors
+            )
         except Exception as exc:
             reason = _model_error_reason(exc)
             logger.warning("Clustering failed (non-fatal): %s", reason)
             self._runtime_reason = self._runtime_reason or reason
             return None
 
-    def _cluster_blocking(
-        self, nodes: list[dict[str, Any]]
-    ) -> ClusterComputation:
-        """Embed + HDBSCAN-cluster *nodes* (blocking, CPU-bound)."""
-        import numpy as np  # noqa: PLC0415
-        from model2vec import StaticModel  # noqa: PLC0415
-        from sklearn.cluster import HDBSCAN  # noqa: PLC0415
-
-        model = StaticModel.from_pretrained(MODEL_ID)
-        texts = [_embedding_text(n) for n in nodes]
-        vectors = np.asarray(model.encode(texts), dtype=np.float32)
-        # L2-normalize so Euclidean distance on the unit sphere tracks cosine.
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        unit = vectors / norms
-
-        labels = HDBSCAN(
-            min_cluster_size=_MIN_CLUSTER_SIZE,
-            metric="euclidean",
-            copy=True,
-        ).fit_predict(unit)
-
-        return _assemble_clusters(nodes, unit, labels)
-
 
 # ------------------------------------------------------------------
-# Module-level helpers (pure; unit-testable without the model)
+# Thread-pool worker functions (pure, no self)
 # ------------------------------------------------------------------
 
 
-def _to_hit(result: Any) -> SemanticHit:
-    """Convert a semble ``SearchResult`` into our transport-stable hit."""
-    chunk = result.chunk
-    return SemanticHit(
-        file_path=chunk.file_path,
-        start_line=chunk.start_line,
-        end_line=chunk.end_line,
-        content=chunk.content,
-        score=float(result.score),
-        language=chunk.language,
-    )
+def _embed_blocking(
+    nodes: list[dict[str, Any]],
+) -> list[tuple[str, bytes]]:
+    """Embed *nodes* with model2vec; return (node_id, float32_bytes) pairs."""
+    import numpy as np  # noqa: PLC0415
+    from model2vec import StaticModel  # noqa: PLC0415
+
+    model = StaticModel.from_pretrained(MODEL_ID)
+    texts = [_embedding_text(n) for n in nodes]
+    vectors = np.asarray(model.encode(texts), dtype=np.float32)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    unit = vectors / norms
+    return [(n["id"], unit[i].tobytes()) for i, n in enumerate(nodes)]
+
+
+def _search_blocking(
+    query: str,
+    top_k: int,
+    vectors: Any,
+    node_ids: list[str],
+    node_meta: list[dict[str, Any]],
+) -> list[SemanticHit]:
+    """Embed *query* and rank *vectors* by cosine similarity (blocking)."""
+    import numpy as np  # noqa: PLC0415
+    from model2vec import StaticModel  # noqa: PLC0415
+
+    model = StaticModel.from_pretrained(MODEL_ID)
+    qvec = np.asarray(model.encode([query])[0], dtype=np.float32)
+    norm = float(np.linalg.norm(qvec)) or 1.0
+    qvec /= norm
+
+    scores = vectors @ qvec
+    n = min(top_k, len(scores))
+    if n == 0:
+        return []
+    idxs = np.argpartition(scores, -n)[-n:]
+    idxs = idxs[np.argsort(scores[idxs])[::-1]]
+    return [
+        SemanticHit(
+            node_id=node_ids[i],
+            kind=node_meta[i]["kind"],
+            name=node_meta[i]["name"],
+            qualified_name=node_meta[i]["qualified_name"],
+            file_path=node_meta[i]["file_path"],
+            score=float(scores[i]),
+        )
+        for i in idxs
+    ]
+
+
+def _find_related_blocking(
+    source_idx: int,
+    top_k: int,
+    vectors: Any,
+    node_ids: list[str],
+    node_meta: list[dict[str, Any]],
+) -> list[SemanticHit]:
+    """Find the top_k nodes most similar to *vectors[source_idx]* (blocking)."""
+    import numpy as np  # noqa: PLC0415
+
+    qvec = vectors[source_idx]
+    scores = vectors @ qvec
+    scores = scores.copy()
+    scores[source_idx] = -1.0  # exclude the source itself
+    n = min(top_k, len(scores) - 1)
+    if n <= 0:
+        return []
+    idxs = np.argpartition(scores, -n)[-n:]
+    idxs = idxs[np.argsort(scores[idxs])[::-1]]
+    return [
+        SemanticHit(
+            node_id=node_ids[i],
+            kind=node_meta[i]["kind"],
+            name=node_meta[i]["name"],
+            qualified_name=node_meta[i]["qualified_name"],
+            file_path=node_meta[i]["file_path"],
+            score=float(scores[i]),
+        )
+        for i in idxs
+    ]
+
+
+def _cluster_blocking(
+    node_ids: list[str],
+    node_meta: list[dict[str, Any]],
+    vectors: Any,
+) -> ClusterComputation:
+    """HDBSCAN-cluster *vectors* and assemble labeled cluster rows (blocking)."""
+    from sklearn.cluster import HDBSCAN  # noqa: PLC0415
+
+    labels = HDBSCAN(
+        min_cluster_size=_MIN_CLUSTER_SIZE,
+        metric="euclidean",
+        copy=True,
+    ).fit_predict(vectors)
+
+    nodes = [
+        {
+            "id": node_ids[i],
+            "qualified_name": node_meta[i]["qualified_name"],
+        }
+        for i in range(len(node_ids))
+    ]
+    return _assemble_clusters(nodes, vectors, labels)
+
+
+# ------------------------------------------------------------------
+# Module-level pure helpers (unit-testable without the model)
+# ------------------------------------------------------------------
+
+
+def _row_meta(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": row["kind"],
+        "name": row["name"],
+        "qualified_name": row["qualified_name"],
+        "file_path": row["file_path"],
+    }
 
 
 def _first_meta(
@@ -458,7 +564,7 @@ def _first_meta(
 
 
 def _embedding_text(node: dict[str, Any]) -> str:
-    """Build the text embedded for a node: name + signature + docstring."""
+    """Build the text to embed for a node: name + signature + docstring."""
     parts: list[str] = [
         str(node.get("qualified_name") or node.get("name") or "")
     ]
@@ -487,11 +593,11 @@ def _split_identifier(name: str) -> list[str]:
 
 def _label_for(names: Iterable[str]) -> tuple[str, list[str]]:
     """
-    Derive a short cluster label and its top terms from member names.
+    Derive a short cluster label and top terms from member names.
 
-    Tokenizes each member's name into identifier sub-tokens, drops generic
-    stopwords, and ranks by frequency. Returns ``(label, terms)`` where the
-    label joins the top terms (falling back to a generic label if nothing
+    Tokenises each member's name into identifier sub-tokens, drops generic
+    stopwords, and ranks by frequency.  Returns ``(label, terms)`` where the
+    label joins the top terms (falling back to ``"misc"`` if nothing
     distinctive survives).
     """
     counter: Counter[str] = Counter()
@@ -512,9 +618,9 @@ def _assemble_clusters(
     """
     Build cluster rows + assignments from HDBSCAN labels and unit vectors.
 
-    Noise points (label ``-1``) are left unclustered. Each member's score is
-    the cosine similarity to its cluster centroid (vectors are unit-norm, so
-    that is just the dot product), giving a tightness signal that orders
+    Noise points (label ``-1``) are left unclustered.  Each member's score
+    is the cosine similarity to its cluster centroid (vectors are unit-norm,
+    so that is just the dot product), giving a tightness signal that orders
     members and lets callers gauge how representative a member is.
     """
     import numpy as np  # noqa: PLC0415
@@ -528,10 +634,7 @@ def _assemble_clusters(
 
     clusters: list[dict[str, Any]] = []
     assignments: list[dict[str, Any]] = []
-    # Renumber to dense, size-sorted ids (largest cluster = 1) for stable,
-    # friendly references regardless of HDBSCAN's internal label numbers.
-    ordered: list[list[int]] = list(by_label.values())
-    ordered.sort(key=len, reverse=True)
+    ordered: list[list[int]] = sorted(by_label.values(), key=len, reverse=True)
     for new_id, members in enumerate(ordered, start=1):
         names = [
             nodes[i].get("qualified_name") or nodes[i].get("name") or ""

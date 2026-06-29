@@ -15,6 +15,7 @@ import pytest
 from graphlens_mcp.indexer import semantic as sem
 from graphlens_mcp.indexer.semantic import (
     SemanticIndex,
+    _assemble_clusters,
     _embedding_text,
     _is_network_error,
     _label_for,
@@ -47,10 +48,8 @@ def test_label_for_ranks_by_frequency_and_drops_stopwords():
     label, terms = _label_for(
         ["create_order", "validate_order", "OrderRepo", "get_order"]
     )
-    # "order" is most frequent and distinctive; "get"/"create" are generic
-    # stopwords and "validate"/"repo" trail. Label leads with "order".
     assert terms[0] == "order"
-    assert "get" not in terms  # stopword
+    assert "get" not in terms
     assert label.startswith("order")
 
 
@@ -83,16 +82,13 @@ def test_is_network_error_and_reason():
 
 
 def test_semantic_availability_reports_install_hint_when_absent(monkeypatch):
-    # Deterministic regardless of whether the [semantic] extra is installed:
-    # block the optional imports and assert the layer reports itself off with
-    # an actionable install hint (the contract the base install relies on).
     import builtins
 
     real_import = builtins.__import__
 
     def blocked(name, *args, **kwargs):
-        if name in ("semble", "sklearn") or name.startswith(
-            ("semble.", "sklearn.")
+        if name in ("model2vec", "sklearn") or name.startswith(
+            ("model2vec.", "sklearn.")
         ):
             msg = "blocked for test"
             raise ImportError(msg)
@@ -126,48 +122,79 @@ def test_assemble_clusters_excludes_noise_and_scores_by_centroid():
         ],
         dtype=np.float32,
     )
-    # Two members are HDBSCAN noise (label -1) and must be dropped.
     labels = np.array([7, 7, 7, -1, -1])
 
-    comp = sem._assemble_clusters(nodes, vectors, labels)
+    comp = _assemble_clusters(nodes, vectors, labels)
 
     assert len(comp.clusters) == 1
     cluster = comp.clusters[0]
-    assert cluster["id"] == 1  # renumbered to dense, size-sorted ids
+    assert cluster["id"] == 1
     assert cluster["size"] == 3
     assert "auth" in cluster["label"]
     assigned = {a["node_id"] for a in comp.assignments}
     assert assigned == {"a0", "a1", "a2"}
-    # Members identical to their centroid score ~1.0.
     assert all(abs(a["score"] - 1.0) < 1e-6 for a in comp.assignments)
 
 
-# ---- graceful degradation + e2e with a fake model ------------------------
+# ---- graceful degradation ------------------------------------------------
 
 
 async def test_search_degrades_gracefully_on_build_failure(
     tmp_path, monkeypatch
 ):
-    semble = pytest.importorskip("semble")
+    """When the model is blocked, build() fails and search reports unavailable."""
+    model2vec = pytest.importorskip("model2vec")
+    pytest.importorskip("sklearn")
 
     def boom(*_a, **_k):
         msg = "ProxyError 403 Forbidden while fetching model"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(semble.SembleIndex, "from_path", boom)
-    idx = SemanticIndex(tmp_path, tmp_path / ".graphlens" / "idx")
+    monkeypatch.setattr(model2vec.StaticModel, "from_pretrained", boom)
 
-    resp = await idx.search("anything", top_k=3)
+    from graphlens_mcp.store.sqlite_store import SqliteStore
 
-    assert resp.available is False
-    assert resp.reason and "model" in resp.reason.lower()
-    # The reason is sticky for the session so we don't retry a blocked fetch.
-    assert idx.availability.ok is False
+    store = await SqliteStore.create(tmp_path / "test.db")
+    try:
+        # Insert a minimal node so get_nodes_for_clustering returns something.
+        await store._conn.execute(
+            "INSERT INTO nodes(id, kind, qualified_name, name, file_path) "
+            "VALUES('n1', 'function', 'pkg.foo', 'foo', '/x/a.py')"
+        )
+        await store._conn.execute(
+            "INSERT INTO files(path, hash, mtime, size, status, language) "
+            "VALUES('/x/a.py', 'abc', 1.0, 10, 'ok', 'python')"
+        )
+        await store._conn.commit()
+
+        idx = SemanticIndex()
+        avail = await idx.build(store)
+        assert avail.ok is False
+        assert "model" in avail.reason.lower()
+
+        # The sticky reason prevents further model attempts.
+        resp = await idx.search(store, "anything", top_k=3)
+        assert resp.available is False
+        assert resp.reason and "model" in resp.reason.lower()
+        assert idx.availability.ok is False
+    finally:
+        await store.close()
 
 
-async def test_compute_clusters_returns_none_below_min(monkeypatch):
-    idx = SemanticIndex(Path("/x"), Path("/x/idx"))
-    assert await idx.compute_clusters([{"id": "only"}]) is None
+async def test_compute_clusters_returns_none_when_no_embeddings():
+    """compute_clusters returns None when the vector cache is empty."""
+    pytest.importorskip("sklearn")
+
+    class _MockStore:
+        async def get_embedding_rows(self):
+            return []
+
+    idx = SemanticIndex()
+    result = await idx.compute_clusters(_MockStore())
+    assert result is None
+
+
+# ---- e2e with a fake model -----------------------------------------------
 
 
 async def test_compute_clusters_end_to_end_with_fake_model(monkeypatch):
@@ -194,29 +221,85 @@ async def test_compute_clusters_end_to_end_with_fake_model(monkeypatch):
     monkeypatch.setattr(model2vec, "StaticModel", FakeModel)
 
     nodes = [
-        {
-            "id": f"a{i}",
-            "qualified_name": f"m.authLogin{i}",
-            "metadata_json": None,
-        }
+        {"id": f"a{i}", "qualified_name": f"m.authLogin{i}", "metadata_json": None}
         for i in range(4)
     ] + [
-        {
-            "id": f"p{i}",
-            "qualified_name": f"m.payCharge{i}",
-            "metadata_json": None,
-        }
+        {"id": f"p{i}", "qualified_name": f"m.payCharge{i}", "metadata_json": None}
         for i in range(4)
     ]
-    idx = SemanticIndex(Path("/x"), Path("/x/idx"))
 
-    comp = await idx.compute_clusters(nodes)
+    # Manually load the cache (bypass store) by patching the index state.
+    idx = SemanticIndex()
 
-    # The whole pipeline (embed -> normalize -> cluster -> assemble) ran
-    # offline; we assert structural validity rather than an exact partition
-    # (HDBSCAN's exact labels on synthetic data are not contractual).
+    # Pre-populate the vector cache directly so compute_clusters uses it.
+    fake_vecs = np.array(
+        [[1.0, 0.0, 0.0]] * 4 + [[0.0, 1.0, 0.0]] * 4, dtype=np.float32
+    )
+    idx._vectors = fake_vecs
+    idx._node_ids = [n["id"] for n in nodes]
+    idx._node_meta = [
+        {
+            "kind": "function",
+            "name": n["qualified_name"].split(".")[-1],
+            "qualified_name": n["qualified_name"],
+            "file_path": None,
+        }
+        for n in nodes
+    ]
+    idx._dirty = False
+
+    class _MockStore:
+        async def get_embedding_rows(self):
+            return []
+
+    comp = await idx.compute_clusters(_MockStore())
+
     assert comp is not None
     node_ids = {n["id"] for n in nodes}
     assert {a["node_id"] for a in comp.assignments}.issubset(node_ids)
     assert all(c["size"] >= 1 for c in comp.clusters)
     assert all(-1.0001 <= a["score"] <= 1.0001 for a in comp.assignments)
+
+
+async def test_search_returns_node_hits_with_fake_model(tmp_path, monkeypatch):
+    """search() returns SemanticHit objects with graph node metadata."""
+    model2vec = pytest.importorskip("model2vec")
+    np = pytest.importorskip("numpy")
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(_id):
+            return FakeModel()
+
+        def encode(self, texts):
+            return np.ones((len(texts), 3), dtype=np.float32)
+
+    monkeypatch.setattr(model2vec, "StaticModel", FakeModel)
+
+    from graphlens_mcp.store.sqlite_store import SqliteStore
+
+    store = await SqliteStore.create(tmp_path / "test.db")
+    try:
+        await store._conn.execute(
+            "INSERT INTO files(path, hash, mtime, size, status, language) "
+            "VALUES('/x/a.py', 'abc', 1.0, 10, 'ok', 'python')"
+        )
+        await store._conn.execute(
+            "INSERT INTO nodes(id, kind, qualified_name, name, file_path) "
+            "VALUES('n1', 'function', 'pkg.helper', 'helper', '/x/a.py')"
+        )
+        await store._conn.commit()
+
+        idx = SemanticIndex()
+        avail = await idx.build(store)
+        assert avail.ok is True
+
+        resp = await idx.search(store, "helper function", top_k=5)
+        assert resp.available is True
+        assert len(resp.hits) == 1
+        hit = resp.hits[0]
+        assert hit.node_id == "n1"
+        assert hit.kind == "function"
+        assert hit.name == "helper"
+    finally:
+        await store.close()

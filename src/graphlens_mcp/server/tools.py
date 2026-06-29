@@ -37,7 +37,6 @@ from graphlens_mcp.store.sqlite_store import SqliteStore, worst_status
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from graphlens_mcp.indexer.semantic import SemanticResponse
     from graphlens_mcp.indexer.workspace import Workspace
 
 # Directories never worth grepping; ripgrep also honors .gitignore, this is the
@@ -482,30 +481,16 @@ def _python_grep(
 # ----------------------------------------------------------------------
 
 
-async def _bridge_hits(
-    store: SqliteStore,
-    workspace: Workspace,
-    response: SemanticResponse,
-) -> list[SemanticHit]:
-    """Attach overlapping graph node refs to each semantic hit."""
-    hits: list[SemanticHit] = []
-    for hit in response.hits:
-        abs_path = str(_resolve_in_project(workspace, hit.file_path))
-        rows = await store.nodes_overlapping(
-            abs_path, hit.start_line, hit.end_line, limit=3
-        )
-        hits.append(
-            SemanticHit(
-                file_path=abs_path,
-                start_line=hit.start_line,
-                end_line=hit.end_line,
-                score=hit.score,
-                content=hit.content,
-                language=hit.language,
-                nodes=[NodeRef.from_row(r) for r in rows],
-            )
-        )
-    return hits
+def _hit_to_model(h: Any) -> SemanticHit:
+    """Convert an indexer SemanticHit dataclass to the Pydantic model."""
+    return SemanticHit(
+        node_id=h.node_id,
+        kind=h.kind,
+        name=h.name,
+        qualified_name=h.qualified_name,
+        file_path=h.file_path,
+        score=h.score,
+    )
 
 
 async def tool_search_semantic(
@@ -513,25 +498,22 @@ async def tool_search_semantic(
     workspace: Workspace,
     query: str,
     limit: int = 10,
-    max_snippet_lines: int = 40,
 ) -> SemanticResult:
     """
     Search the codebase by *meaning*, not just name or text.
 
     Best when you don't know the exact symbol name: a natural-language
     description ("retry an HTTP request with backoff") or a code-like query.
-    Each hit carries the graph nodes it overlaps, so you can pivot straight
-    into get_callers / get_callees. Requires the [semantic] extra; if it is
+    Each hit is a graph node — pass node_id straight to get_callers /
+    get_callees / get_node_info. Requires the [semantic] extra; if it is
     unavailable the result says so (available=False) — fall back to
     search_symbols / search_code.
     """
     cap = min(limit, MAX_RESULTS)
-    response = await workspace.semantic.search(
-        query, top_k=cap, max_snippet_lines=max_snippet_lines
-    )
+    response = await workspace.semantic.search(store, query, top_k=cap)
     if not response.available:
         return SemanticResult(available=False, reason=response.reason)
-    hits = await _bridge_hits(store, workspace, response)
+    hits = [_hit_to_model(h) for h in response.hits]
     return SemanticResult(hits=hits, count=len(hits), available=True)
 
 
@@ -540,45 +522,22 @@ async def tool_find_related(
     workspace: Workspace,
     node_id: str,
     limit: int = 5,
-    max_snippet_lines: int = 40,
 ) -> SemanticResult:
     """
-    Find code semantically similar to a given symbol.
+    Find graph nodes semantically similar to a given symbol.
 
-    Pass a node id (from search_symbols / search_semantic); returns chunks
-    that resemble that symbol's implementation, each bridged back to graph
-    nodes. Useful for "find other places that do something like this".
-    Requires the [semantic] extra.
+    Pass a node id (from search_symbols / search_semantic); returns graph
+    nodes whose embedding is closest to the source node — "find other code
+    that does something like this". Requires the [semantic] extra.
     """
     node = await store.get_node(node_id)
     if node is None:
         return SemanticResult(error=f"Node {node_id!r} not found")
-    await _fresh_status(workspace, node)
-    node = await store.get_node(node_id) or node
-    file_path = node.get("file_path")
-    span_json = node.get("span_json")
-    if not file_path or not span_json:
-        return SemanticResult(
-            error="Node has no source span to find related code from"
-        )
-    try:
-        start_line, _, end_line, _ = json.loads(span_json)
-    except (ValueError, TypeError):
-        return SemanticResult(error="Node span is malformed")
-    content = _read_span(file_path, span_json) or ""
     cap = min(limit, MAX_RESULTS)
-    response = await workspace.semantic.find_related(
-        file_path=str(_resolve_in_project(workspace, file_path)),
-        start_line=start_line,
-        end_line=end_line,
-        content=content,
-        language=None,
-        top_k=cap,
-        max_snippet_lines=max_snippet_lines,
-    )
+    response = await workspace.semantic.find_related(store, node_id, top_k=cap)
     if not response.available:
         return SemanticResult(available=False, reason=response.reason)
-    hits = await _bridge_hits(store, workspace, response)
+    hits = [_hit_to_model(h) for h in response.hits]
     return SemanticResult(hits=hits, count=len(hits), available=True)
 
 
