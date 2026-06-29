@@ -699,17 +699,7 @@ class SqliteStore:
     async def clear_all(self) -> None:
         """Wipe every table — used for a rebuild and schema-version resets."""
         async with self._writing():
-            for table in (
-                "nodes_fts",
-                "node_embeddings",
-                "node_clusters",
-                "clusters",
-                "edges",
-                "nodes",
-                "deps",
-                "files",
-                "meta",
-            ):
+            for table in _ALL_TABLES:
                 await self._conn.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed table allowlist
 
     # ------------------------------------------------------------------

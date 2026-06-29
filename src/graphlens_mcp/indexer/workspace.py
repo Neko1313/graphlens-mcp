@@ -242,7 +242,7 @@ class Workspace:
                             method,
                             exc,
                         )
-                    return
+                    break
 
     # ------------------------------------------------------------------
     # Full index
@@ -334,6 +334,7 @@ class Workspace:
         current = await self.store.files_fingerprint()
         if stored != current:
             await self.store.set_meta(_HASH_KEY, current)
+            await self.store.set_meta(_PHASE_KEY, _PHASE_GRAPH)
             self.semantic.mark_dirty()
             self._clusters_dirty = True
             return
@@ -654,10 +655,29 @@ class Workspace:
         paths: list[Path],
     ) -> None:
         """Full-analyze one package root's changed *paths* and persist each."""
-        async with self._semaphore:
-            graph = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: adapter.analyze(root, files=paths)
+        # Snapshot hash + stat before the slow analyze() so we can detect
+        # files that changed on disk while the executor ran.  Storing stale
+        # graph nodes with the post-change hash would defeat freshness checks.
+        pre: dict[str, tuple[str, Any]] = {}
+        for path in paths:
+            path_str = await _aresolve(path)
+            with contextlib.suppress(OSError):
+                pre[path_str] = (
+                    await _ahash(path_str),
+                    await _astat(path_str),
+                )
+
+        try:
+            async with self._semaphore:
+                graph = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: adapter.analyze(root, files=paths)
+                )
+        except Exception as exc:
+            logger.warning(
+                "Incremental analyze failed for %s at %s: %s", lang, root, exc
             )
+            return
+
         # Relative FILE paths emitted by the engine are relative to the root
         # it analyzed (the package root), so normalize against that root.
         graph = _normalize_graph_paths(graph, root)
@@ -668,15 +688,24 @@ class Workspace:
         )
         for path in paths:
             path_str = await _aresolve(path)
-            try:
-                stat = await _astat(path_str)
-            except OSError:
+            snap = pre.get(path_str)
+            if snap is None:
+                continue
+            pre_hash, stat = snap
+            post_hash = await _ahash(path_str)
+            if post_hash != pre_hash:
+                # File changed while analyze() ran; skip so the watcher
+                # re-indexes it on the next change event.
+                logger.debug(
+                    "File changed during analyze, skipping patch: %s",
+                    path_str,
+                )
                 continue
             sub = graph.subgraph_for_file(path_str)
             await self.store.apply_patch(
                 sub,
                 path_str,
-                await _ahash(path_str),
+                pre_hash,
                 stat.st_mtime,
                 stat.st_size,
                 file_status,

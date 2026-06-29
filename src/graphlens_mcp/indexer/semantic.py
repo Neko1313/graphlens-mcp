@@ -175,6 +175,9 @@ class SemanticIndex:
         # Sticky reason once the model proves unreachable — avoids retrying a
         # slow/blocked fetch on every query within a session.
         self._runtime_reason: str | None = None
+        # Cached model object — loaded once in build() and reused by search()
+        # so we don't pay a model-deserialize cost on every query.
+        self._model: Any = None
         # In-memory vector cache (rebuilt lazily from the store).
         self._vectors: Any = None  # np.ndarray (N, D), unit-normalised
         self._node_ids: list[str] = []
@@ -209,7 +212,10 @@ class SemanticIndex:
             if not nodes:
                 self._dirty = False
                 return Availability(ok=True)
-            embedding_rows = await asyncio.to_thread(_embed_blocking, nodes)
+            model, embedding_rows = await asyncio.to_thread(
+                _embed_blocking, nodes
+            )
+            self._model = model
             await store.store_embeddings(embedding_rows)
             # Reload in-memory cache immediately so the next search is fast.
             rows = await store.get_embedding_rows()
@@ -293,9 +299,30 @@ class SemanticIndex:
         vectors = self._vectors
         node_ids = self._node_ids
         node_meta = self._node_meta
+        # Reuse the model loaded during build(); load lazily on first search
+        # after a service restart (vectors restored from store, model not yet
+        # in memory).
+        model = self._model
+        if model is None:
+            try:
+                model = await asyncio.to_thread(
+                    lambda: model2vec.StaticModel.from_pretrained(MODEL_ID)
+                )
+                self._model = model
+            except Exception as load_exc:
+                reason = _model_error_reason(load_exc)
+                logger.warning("Model load failed during search: %s", reason)
+                self._runtime_reason = reason
+                return SemanticResponse(available=False, reason=reason)
         try:
             hits = await asyncio.to_thread(
-                _search_blocking, query, top_k, vectors, node_ids, node_meta
+                _search_blocking,
+                query,
+                top_k,
+                vectors,
+                node_ids,
+                node_meta,
+                model,
             )
         except Exception as exc:
             reason = _model_error_reason(exc)
@@ -379,9 +406,7 @@ class SemanticIndex:
                 _cluster_blocking, node_ids, node_meta, vectors
             )
         except Exception as exc:
-            reason = _model_error_reason(exc)
-            logger.warning("Clustering failed (non-fatal): %s", reason)
-            self._runtime_reason = self._runtime_reason or reason
+            logger.warning("Clustering failed (non-fatal): %s", exc)
             return None
 
 
@@ -392,15 +417,15 @@ class SemanticIndex:
 
 def _embed_blocking(
     nodes: list[dict[str, Any]],
-) -> list[tuple[str, bytes]]:
-    """Embed *nodes* with model2vec; return (node_id, float32_bytes) pairs."""
+) -> tuple[Any, list[tuple[str, bytes]]]:
+    """Embed *nodes*; return (model, (node_id, float32_bytes) pairs)."""
     model = model2vec.StaticModel.from_pretrained(MODEL_ID)
     texts = [_embedding_text(n) for n in nodes]
     vectors = np.asarray(model.encode(texts), dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     unit = vectors / norms
-    return [(n["id"], unit[i].tobytes()) for i, n in enumerate(nodes)]
+    return model, [(n["id"], unit[i].tobytes()) for i, n in enumerate(nodes)]
 
 
 def _search_blocking(
@@ -409,9 +434,9 @@ def _search_blocking(
     vectors: Any,
     node_ids: list[str],
     node_meta: list[dict[str, Any]],
+    model: Any,
 ) -> list[SemanticHit]:
     """Embed *query* and rank *vectors* by cosine similarity (blocking)."""
-    model = model2vec.StaticModel.from_pretrained(MODEL_ID)
     qvec = np.asarray(model.encode([query])[0], dtype=np.float32)
     norm = float(np.linalg.norm(qvec)) or 1.0
     qvec /= norm
@@ -446,7 +471,10 @@ def _find_related_blocking(
     qvec = vectors[source_idx]
     scores = vectors @ qvec
     scores = scores.copy()
-    scores[source_idx] = -1.0  # exclude the source itself
+    # -2.0 is strictly below any cosine similarity (-1.0 floor for unit
+    # vectors), guaranteeing the source is the unique minimum even when
+    # another node happens to score exactly -1.0 (antipodal embedding).
+    scores[source_idx] = -2.0
     n = min(top_k, len(scores) - 1)
     if n <= 0:
         return []

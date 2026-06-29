@@ -16,6 +16,11 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from graphlens_mcp.indexer.semantic import (
+    _DOCSTRING_KEYS,
+    _SIGNATURE_KEYS,
+    _first_meta,
+)
 from graphlens_mcp.server.models import (
     MAX_RESULTS,
     ClusterInfo,
@@ -47,10 +52,6 @@ _GREP_EXCLUDED = frozenset(
 # "no matches" which is not an error.
 _RG_ERROR_EXIT = 2
 
-# Metadata keys graphlens adapters commonly attach to a definition node.
-_SIGNATURE_KEYS = ("signature", "sig")
-_DOCSTRING_KEYS = ("docstring", "doc", "documentation")
-
 
 def _read_span(path: str | None, span_json: str | None) -> str | None:
     # Read the span directly from disk (1-based, inclusive line range).
@@ -67,25 +68,6 @@ def _read_span(path: str | None, span_json: str | None) -> str | None:
         return "".join(snippet).rstrip("\n")
     except (OSError, ValueError, IndexError):
         return None
-
-
-def _first_meta(
-    metadata_json: str | None, keys: tuple[str, ...]
-) -> str | None:
-    """Return the first present string value among *keys* in metadata."""
-    if not metadata_json:
-        return None
-    try:
-        meta = json.loads(metadata_json)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(meta, dict):
-        return None
-    for key in keys:
-        value = meta.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
 
 
 def _resolve_in_project(workspace: Workspace, path: str) -> Path:
@@ -591,13 +573,14 @@ async def tool_list_clusters(
             reason=reason or "Clusters could not be computed.",
         )
     cap = min(limit, MAX_RESULTS)
-    rows = await store.list_clusters(min_size=min_size, limit=cap)
-    refs = [cluster_ref_from_row(r) for r in rows]
+    rows = await store.list_clusters(min_size=min_size, limit=cap + 1)
+    truncated = len(rows) > cap
+    refs = [cluster_ref_from_row(r) for r in rows[:cap]]
     return ClusterList(
         clusters=refs,
         count=len(refs),
         available=True,
-        truncated=len(rows) >= cap,
+        truncated=truncated,
     )
 
 
