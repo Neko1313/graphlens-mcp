@@ -8,10 +8,10 @@ no file chunking, no external retrieval service, no chunk→node bridge.
 Each search hit is already a graph node, so the result pivots straight into
 get_callers/get_callees without extra indirection.
 
-Every heavy import (model2vec, numpy, sklearn) is lazy and guarded so a
-base install stays dependency-light.  :func:`semantic_availability` reports
-whether the optional ``[semantic]`` extra is present, and build/query
-degrade gracefully when the embedding model cannot be fetched.
+model2vec, numpy, and scikit-learn are required dependencies.  The only
+graceful-degradation path that remains is a model-download failure (network
+outage, HF egress blocked), which is stored as a sticky reason and reported
+via ``available=False`` so the caller can surface it without crashing.
 """
 
 from __future__ import annotations
@@ -23,6 +23,10 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+import model2vec
+import numpy as np
+from sklearn.cluster import HDBSCAN
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -113,28 +117,6 @@ class ClusterComputation:
     assignments: list[dict[str, Any]]
 
 
-_INSTALL_HINT = (
-    "Semantic search is not available: install the optional extra with "
-    "`uv sync --extra semantic` (or `pip install 'graphlens-mcp[semantic]'`)."
-)
-
-
-def semantic_availability() -> Availability:
-    """
-    Report whether the ``[semantic]`` extra is importable.
-
-    Checks only that the heavy packages import — not that the embedding
-    model can be fetched, which is discovered (and reported) at build/query
-    time, since it depends on runtime network/egress.
-    """
-    try:
-        import model2vec  # noqa: F401, PLC0415
-        import sklearn  # noqa: F401, PLC0415
-    except ImportError:
-        return Availability(ok=False, reason=_INSTALL_HINT)
-    return Availability(ok=True)
-
-
 def _is_network_error(exc: BaseException) -> bool:
     """Tell whether a model fetch failed for a network/egress reason."""
     text = f"{type(exc).__name__}: {exc}".lower()
@@ -183,8 +165,8 @@ class SemanticIndex:
     incremental edits via :meth:`mark_dirty`.
 
     All blocking work (model load, encode, cluster) runs off the event loop
-    in a thread pool.  When the extra is missing or the model is unreachable
-    every method returns a structured reason rather than raising.
+    in a thread pool.  When the model is unreachable every method returns a
+    structured reason rather than raising.
     """
 
     def __init__(self) -> None:  # noqa: D107
@@ -204,10 +186,7 @@ class SemanticIndex:
 
     @property
     def availability(self) -> Availability:
-        """Import-level availability plus any runtime error."""
-        base = semantic_availability()
-        if not base.ok:
-            return base
+        """Runtime availability — ok unless the model failed to load."""
         if self._runtime_reason is not None:
             return Availability(ok=False, reason=self._runtime_reason)
         return Availability(ok=True)
@@ -224,9 +203,6 @@ class SemanticIndex:
         cache so the next search is immediate.  Returns availability so the
         pipeline can checkpoint whether the semantic phase completed.
         """
-        base = semantic_availability()
-        if not base.ok:
-            return base
         self._runtime_reason = None
         try:
             nodes = await store.get_nodes_for_clustering()
@@ -253,9 +229,6 @@ class SemanticIndex:
 
     async def _ensure_vectors(self, store: SqliteStore) -> Availability:
         """Load (or reload) the in-memory vector cache from the store."""
-        base = semantic_availability()
-        if not base.ok:
-            return base
         if self._runtime_reason is not None:
             return Availability(ok=False, reason=self._runtime_reason)
         if not self._dirty and self._vectors is not None:
@@ -278,8 +251,6 @@ class SemanticIndex:
 
     def _load_blocking(self, rows: list[dict[str, Any]]) -> None:
         """Deserialize stored bytes into the numpy cache (blocking)."""
-        import numpy as np  # noqa: PLC0415
-
         if not rows:
             self._node_ids = []
             self._node_meta = []
@@ -384,12 +355,9 @@ class SemanticIndex:
         """
         Cluster the stored node vectors using HDBSCAN.
 
-        Returns None when the layer is unavailable or there are too few
-        nodes, so the caller can skip the cluster phase without treating it
-        as a hard failure.
+        Returns None when there are too few nodes, so the caller can skip
+        the cluster phase without treating it as a hard failure.
         """
-        if not semantic_availability().ok:
-            return None
         avail = await self._ensure_vectors(store)
         if not avail.ok:
             return None
@@ -426,10 +394,7 @@ def _embed_blocking(
     nodes: list[dict[str, Any]],
 ) -> list[tuple[str, bytes]]:
     """Embed *nodes* with model2vec; return (node_id, float32_bytes) pairs."""
-    import numpy as np  # noqa: PLC0415
-    from model2vec import StaticModel  # noqa: PLC0415
-
-    model = StaticModel.from_pretrained(MODEL_ID)
+    model = model2vec.StaticModel.from_pretrained(MODEL_ID)
     texts = [_embedding_text(n) for n in nodes]
     vectors = np.asarray(model.encode(texts), dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
@@ -446,10 +411,7 @@ def _search_blocking(
     node_meta: list[dict[str, Any]],
 ) -> list[SemanticHit]:
     """Embed *query* and rank *vectors* by cosine similarity (blocking)."""
-    import numpy as np  # noqa: PLC0415
-    from model2vec import StaticModel  # noqa: PLC0415
-
-    model = StaticModel.from_pretrained(MODEL_ID)
+    model = model2vec.StaticModel.from_pretrained(MODEL_ID)
     qvec = np.asarray(model.encode([query])[0], dtype=np.float32)
     norm = float(np.linalg.norm(qvec)) or 1.0
     qvec /= norm
@@ -481,8 +443,6 @@ def _find_related_blocking(
     node_meta: list[dict[str, Any]],
 ) -> list[SemanticHit]:
     """Find top_k nodes most similar to *vectors[source_idx]* (blocking)."""
-    import numpy as np  # noqa: PLC0415
-
     qvec = vectors[source_idx]
     scores = vectors @ qvec
     scores = scores.copy()
@@ -511,8 +471,6 @@ def _cluster_blocking(
     vectors: Any,
 ) -> ClusterComputation:
     """HDBSCAN-cluster *vectors*, assemble labeled cluster rows (blocking)."""
-    from sklearn.cluster import HDBSCAN  # noqa: PLC0415
-
     labels = HDBSCAN(
         min_cluster_size=_MIN_CLUSTER_SIZE,
         metric="euclidean",
@@ -622,8 +580,6 @@ def _assemble_clusters(
     so that is just the dot product), giving a tightness signal that orders
     members and lets callers gauge how representative a member is.
     """
-    import numpy as np  # noqa: PLC0415
-
     by_label: dict[int, list[int]] = {}
     for idx, raw in enumerate(labels):
         label = int(raw)

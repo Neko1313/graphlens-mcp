@@ -13,19 +13,15 @@ dependencies = [
     "click>=8.4.2",
     "fastmcp>=3.4.2",
     "graphlens[go,python,rust,typescript,php]>=0.7.0",
+    "model2vec>=0.4",
     "questionary>=2.0.1",
+    "scikit-learn>=1.3",
     "tomlkit>=0.15.0",
     "watchfiles>=0.24",
 ]
 
 [project.scripts]
 graphlens-mcp = "graphlens_mcp.cli:main"
-
-[project.optional-dependencies]
-semantic = [
-    "model2vec>=0.4",
-    "scikit-learn>=1.3",
-]
 
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]

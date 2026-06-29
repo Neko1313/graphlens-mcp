@@ -16,7 +16,6 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from graphlens_mcp.indexer.semantic import semantic_availability
 from graphlens_mcp.server.models import (
     MAX_RESULTS,
     ClusterInfo,
@@ -553,7 +552,7 @@ async def tool_find_related(
 
     Pass a node id (from search_symbols / search_semantic); returns graph
     nodes whose embedding is closest to the source node — "find other code
-    that does something like this". Requires the [semantic] extra.
+    that does something like this".
     """
     node = await store.get_node(node_id)
     if node is None:
@@ -567,7 +566,7 @@ async def tool_find_related(
 
 
 # ----------------------------------------------------------------------
-# Semantic clusters (optional [semantic] extra)
+# Semantic clusters
 # ----------------------------------------------------------------------
 
 
@@ -583,11 +582,8 @@ async def tool_list_clusters(
     A map of "what this codebase is about": each cluster groups symbols that
     are semantically similar (e.g. auth, serialization, retry logic) with an
     auto-derived label. Use it to orient in an unfamiliar repo, then
-    get_cluster to drill into one. Requires the [semantic] extra.
+    get_cluster to drill into one.
     """
-    avail = semantic_availability()
-    if not avail.ok:
-        return ClusterList(available=False, reason=avail.reason)
     if not await workspace.ensure_clusters():
         reason = workspace.semantic.availability.reason
         return ClusterList(
@@ -616,11 +612,8 @@ async def tool_get_cluster(
 
     Pass a node id; returns its cluster (label + terms) and the other symbols
     grouped with it — the semantic neighborhood around a symbol, complementing
-    the structural get_neighbors. Requires the [semantic] extra.
+    the structural get_neighbors.
     """
-    avail = semantic_availability()
-    if not avail.ok:
-        return ClusterInfo(available=False, reason=avail.reason)
     await workspace.ensure_clusters()
     cluster_id = await store.get_cluster_id_for_node(node_id)
     if cluster_id is None:

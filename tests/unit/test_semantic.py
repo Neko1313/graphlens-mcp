@@ -1,14 +1,16 @@
-"""Unit tests for the semantic layer: pure helpers + graceful degradation.
+"""Unit tests for the semantic layer: pure helpers + model-error degradation.
 
-These avoid any real model download: pure helpers are deterministic, and the
-build/cluster paths are exercised with a monkeypatched embedding model so the
-graceful-degradation and end-to-end clustering logic are testable offline.
+Pure helpers are deterministic; build/cluster paths are exercised with a
+monkeypatched embedding model so the model-fetch failure and end-to-end
+clustering logic are testable offline.
 """
 
 from __future__ import annotations
 
 import json
 
+import model2vec
+import numpy as np
 import pytest
 
 from graphlens_mcp.indexer.semantic import (
@@ -19,7 +21,6 @@ from graphlens_mcp.indexer.semantic import (
     _label_for,
     _model_error_reason,
     _split_identifier,
-    semantic_availability,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -79,30 +80,10 @@ def test_is_network_error_and_reason():
     assert not _is_network_error(other)
 
 
-def test_semantic_availability_reports_install_hint_when_absent(monkeypatch):
-    import builtins
-
-    real_import = builtins.__import__
-
-    def blocked(name, *args, **kwargs):
-        if name in ("model2vec", "sklearn") or name.startswith(
-            ("model2vec.", "sklearn.")
-        ):
-            msg = "blocked for test"
-            raise ImportError(msg)
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", blocked)
-    av = semantic_availability()
-    assert av.ok is False
-    assert av.reason and "extra" in av.reason
-
-
 # ---- cluster assembly (deterministic, numpy only) ------------------------
 
 
 def test_assemble_clusters_excludes_noise_and_scores_by_centroid():
-    np = pytest.importorskip("numpy")
     nodes = [
         {"id": "a0", "qualified_name": "m.authLogin0"},
         {"id": "a1", "qualified_name": "m.authLogin1"},
@@ -134,15 +115,13 @@ def test_assemble_clusters_excludes_noise_and_scores_by_centroid():
     assert all(abs(a["score"] - 1.0) < 1e-6 for a in comp.assignments)
 
 
-# ---- graceful degradation ------------------------------------------------
+# ---- graceful degradation (model-fetch failure) --------------------------
 
 
 async def test_search_degrades_gracefully_on_build_failure(
     tmp_path, monkeypatch
 ):
-    """When the model is blocked, build() fails and search reports unavailable."""
-    model2vec = pytest.importorskip("model2vec")
-    pytest.importorskip("sklearn")
+    """When the model fetch fails, build() propagates the reason to search."""
 
     def boom(*_a, **_k):
         msg = "ProxyError 403 Forbidden while fetching model"
@@ -154,7 +133,6 @@ async def test_search_degrades_gracefully_on_build_failure(
 
     store = await SqliteStore.create(tmp_path / "test.db")
     try:
-        # Insert a minimal node so get_nodes_for_clustering returns something.
         await store._conn.execute(
             "INSERT INTO nodes(id, kind, qualified_name, name, file_path) "
             "VALUES('n1', 'function', 'pkg.foo', 'foo', '/x/a.py')"
@@ -170,7 +148,7 @@ async def test_search_degrades_gracefully_on_build_failure(
         assert avail.ok is False
         assert "model" in avail.reason.lower()
 
-        # The sticky reason prevents further model attempts.
+        # Sticky reason: subsequent search does not retry the model.
         resp = await idx.search(store, "anything", top_k=3)
         assert resp.available is False
         assert resp.reason and "model" in resp.reason.lower()
@@ -181,7 +159,6 @@ async def test_search_degrades_gracefully_on_build_failure(
 
 async def test_compute_clusters_returns_none_when_no_embeddings():
     """compute_clusters returns None when the vector cache is empty."""
-    pytest.importorskip("sklearn")
 
     class _MockStore:
         async def get_embedding_rows(self):
@@ -196,10 +173,6 @@ async def test_compute_clusters_returns_none_when_no_embeddings():
 
 
 async def test_compute_clusters_end_to_end_with_fake_model(monkeypatch):
-    np = pytest.importorskip("numpy")
-    pytest.importorskip("sklearn")
-    model2vec = pytest.importorskip("model2vec")
-
     class FakeModel:
         @staticmethod
         def from_pretrained(_id):
@@ -234,10 +207,7 @@ async def test_compute_clusters_end_to_end_with_fake_model(monkeypatch):
         for i in range(4)
     ]
 
-    # Manually load the cache (bypass store) by patching the index state.
     idx = SemanticIndex()
-
-    # Pre-populate the vector cache directly so compute_clusters uses it.
     fake_vecs = np.array(
         [[1.0, 0.0, 0.0]] * 4 + [[0.0, 1.0, 0.0]] * 4, dtype=np.float32
     )
@@ -269,8 +239,6 @@ async def test_compute_clusters_end_to_end_with_fake_model(monkeypatch):
 
 async def test_search_returns_node_hits_with_fake_model(tmp_path, monkeypatch):
     """search() returns SemanticHit objects with graph node metadata."""
-    model2vec = pytest.importorskip("model2vec")
-    np = pytest.importorskip("numpy")
 
     class FakeModel:
         @staticmethod

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import model2vec
+import numpy as np
 import pytest
 
 from graphlens_mcp.indexer.workspace import Workspace, default_db_path
@@ -79,8 +81,6 @@ async def test_search_code_reports_invalid_pattern(py_project: Path):
 async def test_search_semantic_unavailable_is_graceful(
     py_project: Path, monkeypatch
 ):
-    model2vec = pytest.importorskip("model2vec")
-
     def boom(*_a, **_k):
         msg = "ProxyError 403 Forbidden fetching model"
         raise RuntimeError(msg)
@@ -106,8 +106,6 @@ async def test_search_semantic_unavailable_is_graceful(
 
 async def test_search_semantic_returns_nodes(py_project: Path, monkeypatch):
     """Hits are graph nodes directly — no chunk→node bridge needed."""
-    model2vec = pytest.importorskip("model2vec")
-    np = pytest.importorskip("numpy")
 
     class FakeModel:
         @staticmethod
@@ -147,9 +145,6 @@ async def test_find_related_unknown_node(py_project: Path):
 async def test_find_related_returns_similar_nodes(
     py_project: Path, monkeypatch
 ):
-    model2vec = pytest.importorskip("model2vec")
-    np = pytest.importorskip("numpy")
-
     class FakeModel:
         @staticmethod
         def from_pretrained(_id):
@@ -182,8 +177,6 @@ async def test_find_related_returns_similar_nodes(
 async def test_list_clusters_unavailable_is_graceful(
     py_project: Path, monkeypatch
 ):
-    model2vec = pytest.importorskip("model2vec")
-
     def boom(_id):
         msg = "ProxyError 403 Forbidden fetching model"
         raise RuntimeError(msg)
@@ -202,8 +195,6 @@ async def test_list_clusters_unavailable_is_graceful(
 async def test_full_index_checkpoint_stops_at_graph_when_model_blocked(
     py_project: Path, monkeypatch
 ):
-    model2vec = pytest.importorskip("model2vec")
-
     def boom(*_a, **_k):
         msg = "ProxyError 403 Forbidden fetching model"
         raise RuntimeError(msg)
@@ -226,10 +217,6 @@ async def test_full_index_checkpoint_stops_at_graph_when_model_blocked(
 async def test_full_index_completes_pipeline_with_fake_model(
     py_project: Path, monkeypatch
 ):
-    model2vec = pytest.importorskip("model2vec")
-    np = pytest.importorskip("numpy")
-    import sklearn  # noqa: F401 — ensure the extra is installed
-
     class FakeModel:
         @staticmethod
         def from_pretrained(_id):
