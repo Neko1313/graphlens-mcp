@@ -86,11 +86,48 @@ new/deleted/edited paths through `reindex_connected`. A wholesale rebuild remain
 
 ## Storage
 
-SQLite with `nodes`, `edges`, `deps`, `files`, `meta` and an FTS5 index over symbol names.
-A dedicated **writer** connection serializes all writes behind a write lock (so
-multi-statement patches are atomic), while a separate read-only connection serves queries
-from the last committed WAL snapshot without queuing behind an in-flight write. WAL is
-enabled for crash-safety and reader/writer concurrency.
+SQLite with `nodes`, `edges`, `deps`, `files`, `meta`, `clusters`, `node_clusters` and an
+FTS5 index over symbol names. A dedicated **writer** connection serializes all writes behind
+a write lock (so multi-statement patches are atomic), while a separate read-only connection
+serves queries from the last committed WAL snapshot without queuing behind an in-flight
+write. WAL is enabled for crash-safety and reader/writer concurrency.
+
+## Semantic layer (optional `[semantic]` extra)
+
+A bolt-on that lets agents search by *meaning* and by *content* — the cases that otherwise
+send them back to `grep` — without adding weight to the base install. See
+[docs/design/semantic-search.md](docs/design/semantic-search.md) for the full design.
+
+- **Content search** (`search_code`) is the grep replacement: regex/text over file content
+  via ripgrep with a pure-Python fallback. No semantic dependency.
+- **Semantic search** (`search_semantic`, `find_related`) wraps [semble](https://github.com/MinishLab/semble)
+  (static embeddings + BM25). Every hit is a `(file, line-range)` chunk that
+  `SqliteStore.nodes_overlapping` bridges back to the graph's **node ids** (tightest
+  enclosing symbol first), so a "found by meaning" result pivots straight into
+  `get_callers`/`get_callees`.
+- **Clusters** (`list_clusters`, `get_cluster`) embed each symbol node (model2vec, the same
+  model semble uses) and group them with HDBSCAN into auto-labeled semantic zones. Sparse
+  nodes are left unclustered; clusters describe dense zones, not a forced partition.
+
+`indexer/semantic.py` imports every heavy package lazily and guarded: importing it never
+fails on a base install, and a missing extra or unreachable embedding model degrades to a
+structured `available=false` reason instead of breaking the graph server. The semble index
+lives in a sidecar (`.graphlens/semble-index`), not in SQLite; clusters live in the
+`clusters`/`node_clusters` tables and, like edges, carry **no foreign key** (a cluster row
+may briefly outlive a node mid-reindex; unresolved members are filtered at read time).
+
+### Unified index cycle & resume
+
+`full_index` runs three phases in order — **graph → semantic → clusters** — recording a
+resume checkpoint in `meta` after each (`index_phase`, with `index_root_hash` =
+`files_fingerprint`). The semantic phases are best-effort: if the extra is absent or the
+model is unreachable the graph index still completes and the checkpoint rests at the graph
+phase. Incremental edits (`reindex_connected`) only *mark* the semantic index and clusters
+stale — re-clustering per file save would be wasteful — and they rebuild lazily on the next
+semantic/cluster query. `serve` calls `resume_pending_index` after `reconcile`: it finishes
+a tail (clustering) that a prior crash interrupted when the fingerprint still matches, and
+otherwise marks the layer stale for lazy rebuild. This is the checkpoint/resume the project
+needs for expensive index work without taking on a durable-workflow framework (e.g. DBOS).
 
 ## Cache, not system of record
 

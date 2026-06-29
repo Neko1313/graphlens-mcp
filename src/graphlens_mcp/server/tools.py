@@ -10,15 +10,30 @@ lookups that touch a file trigger the on-access freshness check first.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from graphlens_mcp.indexer.semantic import (
+    _DOCSTRING_KEYS,
+    _SIGNATURE_KEYS,
+    _first_meta,
+)
 from graphlens_mcp.server.models import (
+    MAX_RESULTS,
+    ClusterInfo,
+    ClusterList,
+    CodeMatch,
+    CodeSearchResult,
     FileStructureResult,
     GraphResult,
     NodeInfoResult,
     NodeRef,
+    SemanticHit,
+    SemanticResult,
+    cluster_ref_from_row,
     to_refs,
 )
 from graphlens_mcp.store.sqlite_store import SqliteStore, worst_status
@@ -28,9 +43,14 @@ if TYPE_CHECKING:
 
     from graphlens_mcp.indexer.workspace import Workspace
 
-# Metadata keys graphlens adapters commonly attach to a definition node.
-_SIGNATURE_KEYS = ("signature", "sig")
-_DOCSTRING_KEYS = ("docstring", "doc", "documentation")
+# Directories never worth grepping; ripgrep also honors .gitignore, this is the
+# pure-Python fallback's equivalent of the watcher's _EXCLUDED_DIRS.
+_GREP_EXCLUDED = frozenset(
+    {".graphlens", ".git", "node_modules", ".venv", "venv", "__pycache__"}
+)
+# ripgrep's exit code for a fatal error (e.g. an invalid regex); exit 1 means
+# "no matches" which is not an error.
+_RG_ERROR_EXIT = 2
 
 
 def _read_span(path: str | None, span_json: str | None) -> str | None:
@@ -48,25 +68,6 @@ def _read_span(path: str | None, span_json: str | None) -> str | None:
         return "".join(snippet).rstrip("\n")
     except (OSError, ValueError, IndexError):
         return None
-
-
-def _first_meta(
-    metadata_json: str | None, keys: tuple[str, ...]
-) -> str | None:
-    """Return the first present string value among *keys* in metadata."""
-    if not metadata_json:
-        return None
-    try:
-        meta = json.loads(metadata_json)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(meta, dict):
-        return None
-    for key in keys:
-        value = meta.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
 
 
 def _resolve_in_project(workspace: Workspace, path: str) -> Path:
@@ -109,9 +110,19 @@ async def tool_search_symbols(
     """
     Search for symbols by name across the whole codebase.
 
-    Use this as the FIRST step when you need to find where a symbol is defined.
-    Returns node IDs you can pass to get_callees / get_callers / get_node_info.
-    The query supports FTS5 prefix syntax (e.g. ``create_order*``).
+    Returns node IDs for use with get_node_info / get_callers /
+    get_callees. Supports FTS5 prefix syntax (``create_order*``).
+
+    **Short or common names rank poorly** — dozens of imports and file
+    nodes share them. Use the most distinctive form available: a
+    compound name (``UserRepository``), a qualified path prefix
+    (``models.Location``), or a wildcard suffix (``OrderSvc*``). When
+    you know the file, ``get_file_structure`` is more reliable.
+
+    Nodes returned with ``file_path: null`` are external stubs (not
+    defined locally). Use ``get_file_structure`` on an importer to
+    find the real definition.  When you don't know the name at all,
+    use ``search_semantic`` instead.
     """
     rows = await store.search_symbols(query, limit=limit)
     refs, truncated = to_refs(rows, limit)
@@ -162,10 +173,17 @@ async def tool_get_file_structure(
     limit: int = 200,
 ) -> FileStructureResult:
     """
-    Return the symbol outline of a file (classes, functions, methods).
+    Return the symbol outline of a single file (classes, functions, methods).
 
-    Triggers on-access freshness check. Use this instead of reading the whole
-    file when you only need to understand its structure.
+    *path* must be a **file** path — passing a directory returns empty.
+    For directory-level exploration pass a qualified name prefix to
+    ``search_symbols`` (e.g. ``"authz."``), or use ``search_semantic``
+    for concept-level discovery.
+
+    Triggers on-access freshness check.  Prefer this over reading the
+    whole file when you only need its structure or want to reliably
+    get a node ID for a common name.  Nodes with ``file_path: null``
+    are external symbols resolved here but not defined locally.
     """
     abs_path = str(_resolve_in_project(workspace, path))
     status = await workspace.ensure_fresh(Path(abs_path))
@@ -305,4 +323,297 @@ async def tool_get_cross_language_calls(
         node_id,
         lambda: store.get_cross_language_calls(node_id),
         limit=limit,
+    )
+
+
+# ----------------------------------------------------------------------
+# Content search (grep replacement) — no semantic dependency
+# ----------------------------------------------------------------------
+
+
+class _GrepError(Exception):
+    """A search engine error (e.g. an invalid regular expression)."""
+
+
+async def tool_search_code(
+    workspace: Workspace,
+    pattern: str,
+    *,
+    path_glob: str | None = None,
+    ignore_case: bool = False,
+    limit: int = 100,
+) -> CodeSearchResult:
+    r"""
+    Search file *content* by regex — the in-graph replacement for grep.
+
+    *pattern* is a PCRE regular expression (ripgrep).  Escape regex
+    metacharacters for literal searches — parentheses, brackets, dots,
+    ``*``, ``+`` must be escaped: ``foo\\(bar\\)``, ``os\\.path``.
+    Use *path_glob* to scope to a file subset (e.g. ``"*.py"``).
+
+    Use for: string literals, log/error messages, comments, TODOs,
+    config values, or raw-text patterns the symbol graph cannot answer.
+    For symbol-level questions ("where is X defined / who calls it?")
+    prefer ``search_symbols`` + ``get_callers`` — they are precise and
+    name-resolved.  Honors .gitignore; skips vendored/build dirs.
+    """
+    cap = min(limit, MAX_RESULTS)
+    root = workspace.project_root
+    try:
+        matches, truncated = await _ripgrep(
+            root,
+            pattern,
+            path_glob=path_glob,
+            ignore_case=ignore_case,
+            cap=cap,
+        )
+    except FileNotFoundError:
+        # No ripgrep binary — fall back to a pure-Python scan.
+        try:
+            matches, truncated = await asyncio.to_thread(
+                _python_grep, root, pattern, path_glob, ignore_case, cap
+            )
+        except _GrepError as exc:
+            return CodeSearchResult(error=str(exc))
+    except _GrepError as exc:
+        return CodeSearchResult(error=str(exc))
+    return CodeSearchResult(
+        matches=matches, count=len(matches), truncated=truncated
+    )
+
+
+async def _ripgrep(
+    root: Path,
+    pattern: str,
+    *,
+    path_glob: str | None,
+    ignore_case: bool,
+    cap: int,
+) -> tuple[list[CodeMatch], bool]:
+    """Run ripgrep with JSON output, capped at *cap* matches."""
+    args = ["rg", "--json", "--no-messages"]
+    if ignore_case:
+        args.append("-i")
+    args += ["--glob", "!.graphlens", "--glob", "!.git"]
+    if path_glob:
+        args += ["--glob", path_glob]
+    args += ["-e", pattern, str(root)]
+
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    matches: list[CodeMatch] = []
+    truncated = False
+    killed = False
+    if proc.stdout is None:  # pragma: no cover - PIPE always yields a stream
+        await proc.wait()
+        return matches, truncated
+    async for raw in proc.stdout:
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        if obj.get("type") != "match":
+            continue
+        data = obj["data"]
+        text = data.get("lines", {}).get("text", "")
+        matches.append(
+            CodeMatch(
+                file_path=data["path"]["text"],
+                line=data["line_number"],
+                text=text.rstrip("\n"),
+            )
+        )
+        if len(matches) >= cap:
+            truncated = True
+            killed = True
+            proc.kill()
+            break
+
+    stderr_data = b""
+    if proc.stderr is not None:
+        stderr_data = await proc.stderr.read()
+    await proc.wait()
+    # rg exits 2 on a fatal error (e.g. a bad regex); 1 == no matches is fine.
+    if not killed and proc.returncode == _RG_ERROR_EXIT and not matches:
+        msg = stderr_data.decode("utf-8", "replace").strip() or "search error"
+        raise _GrepError(msg)
+    return matches, truncated
+
+
+def _python_grep(
+    root: Path,
+    pattern: str,
+    path_glob: str | None,
+    ignore_case: bool,
+    cap: int,
+) -> tuple[list[CodeMatch], bool]:
+    """Pure-Python content search fallback when ripgrep is unavailable."""
+    try:
+        rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+    except re.error as exc:
+        msg = f"invalid pattern: {exc}"
+        raise _GrepError(msg) from exc
+
+    matches: list[CodeMatch] = []
+    for path in root.rglob(path_glob or "*"):
+        if not path.is_file():
+            continue
+        if _GREP_EXCLUDED & set(path.relative_to(root).parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if rx.search(line):
+                matches.append(
+                    CodeMatch(
+                        file_path=str(path), line=lineno, text=line.rstrip()
+                    )
+                )
+                if len(matches) >= cap:
+                    return matches, True
+    return matches, False
+
+
+# ----------------------------------------------------------------------
+# Semantic search / find_related (optional [semantic] extra)
+# ----------------------------------------------------------------------
+
+
+def _hit_to_model(h: Any) -> SemanticHit:
+    """Convert an indexer SemanticHit dataclass to the Pydantic model."""
+    return SemanticHit(
+        node_id=h.node_id,
+        kind=h.kind,
+        name=h.name,
+        qualified_name=h.qualified_name,
+        file_path=h.file_path,
+        score=h.score,
+    )
+
+
+async def tool_search_semantic(
+    store: SqliteStore,
+    workspace: Workspace,
+    query: str,
+    limit: int = 10,
+) -> SemanticResult:
+    """
+    Search the codebase by *meaning* — the primary discovery tool.
+
+    Use when you don't know the symbol name: describe the behavior or
+    concept in natural language ("retry HTTP with backoff", "parse JWT
+    token", "validate user permissions"). Also effective for concept
+    names without a specific identifier ("authentication", "rate limit").
+
+    Each hit is a graph node — pass ``node_id`` directly to
+    ``get_callers`` / ``get_callees`` / ``get_node_info``.  When
+    ``available=False`` in the response, fall back to ``search_symbols``
+    + ``search_code``.
+    """
+    cap = min(limit, MAX_RESULTS)
+    response = await workspace.semantic.search(store, query, top_k=cap)
+    if not response.available:
+        return SemanticResult(available=False, reason=response.reason)
+    hits = [_hit_to_model(h) for h in response.hits]
+    return SemanticResult(hits=hits, count=len(hits), available=True)
+
+
+async def tool_find_related(
+    store: SqliteStore,
+    workspace: Workspace,
+    node_id: str,
+    limit: int = 5,
+) -> SemanticResult:
+    """
+    Find graph nodes semantically similar to a given symbol.
+
+    Pass a node id (from search_symbols / search_semantic); returns graph
+    nodes whose embedding is closest to the source node — "find other code
+    that does something like this".
+    """
+    node = await store.get_node(node_id)
+    if node is None:
+        return SemanticResult(error=f"Node {node_id!r} not found")
+    cap = min(limit, MAX_RESULTS)
+    response = await workspace.semantic.find_related(store, node_id, top_k=cap)
+    if not response.available:
+        return SemanticResult(available=False, reason=response.reason)
+    hits = [_hit_to_model(h) for h in response.hits]
+    return SemanticResult(hits=hits, count=len(hits), available=True)
+
+
+# ----------------------------------------------------------------------
+# Semantic clusters
+# ----------------------------------------------------------------------
+
+
+async def tool_list_clusters(
+    store: SqliteStore,
+    workspace: Workspace,
+    min_size: int = 2,
+    limit: int = 50,
+) -> ClusterList:
+    """
+    List the codebase's semantic clusters — labeled zones of related symbols.
+
+    A map of "what this codebase is about": each cluster groups symbols that
+    are semantically similar (e.g. auth, serialization, retry logic) with an
+    auto-derived label. Use it to orient in an unfamiliar repo, then
+    get_cluster to drill into one.
+    """
+    if not await workspace.ensure_clusters():
+        reason = workspace.semantic.availability.reason
+        return ClusterList(
+            available=False,
+            reason=reason or "Clusters could not be computed.",
+        )
+    cap = min(limit, MAX_RESULTS)
+    rows = await store.list_clusters(min_size=min_size, limit=cap + 1)
+    truncated = len(rows) > cap
+    refs = [cluster_ref_from_row(r) for r in rows[:cap]]
+    return ClusterList(
+        clusters=refs,
+        count=len(refs),
+        available=True,
+        truncated=truncated,
+    )
+
+
+async def tool_get_cluster(
+    store: SqliteStore,
+    workspace: Workspace,
+    node_id: str,
+    limit: int = 50,
+) -> ClusterInfo:
+    """
+    Show the semantic cluster a symbol belongs to, and its sibling members.
+
+    Pass a node id; returns its cluster (label + terms) and the other symbols
+    grouped with it — the semantic neighborhood around a symbol, complementing
+    the structural get_neighbors.
+    """
+    await workspace.ensure_clusters()
+    cluster_id = await store.get_cluster_id_for_node(node_id)
+    if cluster_id is None:
+        if await store.get_node(node_id) is None:
+            return ClusterInfo(error=f"Node {node_id!r} not found")
+        return ClusterInfo(
+            available=True,
+            error="Node is not assigned to a cluster (too sparse to group).",
+        )
+    crow = await store.get_cluster(cluster_id)
+    if crow is None:
+        return ClusterInfo(available=True, error="Cluster no longer exists.")
+    cap = min(limit, MAX_RESULTS)
+    members = await store.get_cluster_members(cluster_id, limit=cap)
+    return ClusterInfo(
+        cluster=cluster_ref_from_row(crow),
+        members=[NodeRef.from_row(m) for m in members],
+        available=True,
+        truncated=len(members) >= cap,
     )

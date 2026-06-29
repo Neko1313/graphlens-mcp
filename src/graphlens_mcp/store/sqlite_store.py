@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -26,9 +27,19 @@ _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 # rather than migrating it (see ARCHITECTURE.md). The stored fingerprint
 # also folds in graphlens' own model SCHEMA_VERSION, so a core model
 # change invalidates the cache too.
-LOCAL_SCHEMA_VERSION = 3
+LOCAL_SCHEMA_VERSION = 5
 
-_ALL_TABLES = ("nodes_fts", "edges", "nodes", "deps", "files", "meta")
+_ALL_TABLES = (
+    "nodes_fts",
+    "node_embeddings",
+    "node_clusters",
+    "clusters",
+    "edges",
+    "nodes",
+    "deps",
+    "files",
+    "meta",
+)
 
 # No "skeleton": every index is a full analyze, so a file is either fully
 # resolved ('ok') or resolved as far as the toolchain allows ('degraded').
@@ -192,6 +203,20 @@ class SqliteStore:
     async def get_schema_fingerprint(self) -> str | None:
         """Return the schema fingerprint stored in the database, if any."""
         return await self._get_meta("schema_fingerprint")
+
+    async def get_meta(self, key: str) -> str | None:
+        """
+        Return a stored meta value (public read of the KV ``meta`` table).
+
+        Exposed so the indexer can persist the semantic index pipeline's
+        resume checkpoint (phase + workspace fingerprint) in the same
+        regenerable cache as the graph, with no extra dependency.
+        """
+        return await self._get_meta(key)
+
+    async def set_meta(self, key: str, value: str) -> None:
+        """Persist a meta value (public write of the KV ``meta`` table)."""
+        await self._set_meta(key, value)
 
     # ------------------------------------------------------------------
     # File freshness
@@ -674,14 +699,7 @@ class SqliteStore:
     async def clear_all(self) -> None:
         """Wipe every table — used for a rebuild and schema-version resets."""
         async with self._writing():
-            for table in (
-                "nodes_fts",
-                "edges",
-                "nodes",
-                "deps",
-                "files",
-                "meta",
-            ):
+            for table in _ALL_TABLES:
                 await self._conn.execute(f"DELETE FROM {table}")  # noqa: S608 — fixed table allowlist
 
     # ------------------------------------------------------------------
@@ -925,6 +943,254 @@ class SqliteStore:
         ) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def files_fingerprint(self) -> str:
+        """
+        Return a content fingerprint of the indexed file set.
+
+        A stable hash over every ``(path, hash)`` pair, so two runs produce
+        the same value iff the same files with the same bytes are indexed.
+        The semantic-index pipeline stores this alongside its resume
+        checkpoint to tell "finish the interrupted build" apart from "the
+        tree changed while we were down" without re-statting the disk.
+        """
+        async with self._read_conn.execute(
+            "SELECT path, hash FROM files ORDER BY path"
+        ) as cur:
+            rows = await cur.fetchall()
+        h = hashlib.sha256()
+        for r in rows:
+            h.update(r["path"].encode("utf-8"))
+            h.update(b"\0")
+            h.update(r["hash"].encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()
+
+    # ------------------------------------------------------------------
+    # Semantic bridge: map a (file, line-range) chunk back to graph nodes
+    # ------------------------------------------------------------------
+
+    async def nodes_overlapping(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """
+        Return graph nodes whose source span overlaps a line range.
+
+        This is the bridge from a semble *chunk* (which knows only
+        ``file_path`` + line range) back to the *node ids* the rest of the
+        graph speaks in, so a semantic hit can pivot straight into
+        ``get_callers`` / ``get_callees``. ``span_json`` is the JSON array
+        ``[start_line, start_col, end_line, end_col]`` written by
+        :func:`_encode_span`, so element 0 is the start line and element 2
+        the end line. Results are ordered by overlap (largest first), then
+        by the tightest span, so the most specific enclosing symbol wins
+        over a whole-module node that merely contains the range.
+        """
+        sql = """
+        SELECT id, kind, qualified_name, name, file_path,
+          MIN(json_extract(span_json, '$[2]'), :end)
+            - MAX(json_extract(span_json, '$[0]'), :start) AS overlap,
+          json_extract(span_json, '$[2]') - json_extract(span_json, '$[0]')
+            AS span_len
+        FROM nodes
+        WHERE file_path = :fp
+          AND span_json IS NOT NULL
+          AND json_extract(span_json, '$[0]') <= :end
+          AND json_extract(span_json, '$[2]') >= :start
+        ORDER BY overlap DESC, span_len ASC
+        LIMIT :limit
+        """
+        async with self._read_conn.execute(
+            sql,
+            {
+                "fp": file_path,
+                "start": start_line,
+                "end": end_line,
+                "limit": limit,
+            },
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_nodes_for_clustering(self) -> list[dict[str, Any]]:
+        """
+        Return file-owned symbol nodes to embed for clustering.
+
+        Only the symbol kinds worth grouping semantically (functions,
+        methods, classes) with a real file are returned; fileless
+        structural nodes (project/module/boundary) and leaf nodes
+        (parameters/variables) are excluded so clusters describe units of
+        behavior rather than scaffolding. ``metadata_json`` is included so
+        the caller can fold a signature/docstring into the embedding text.
+        """
+        sql = """
+        SELECT id, kind, qualified_name, name, file_path, metadata_json
+        FROM nodes
+        WHERE file_path IS NOT NULL
+          AND kind IN ('function', 'method', 'class')
+        ORDER BY id
+        """
+        async with self._read_conn.execute(sql) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Node embedding storage (model2vec float32 vectors)
+    # ------------------------------------------------------------------
+
+    async def store_embeddings(self, rows: list[tuple[str, bytes]]) -> None:
+        """
+        Atomically replace all stored node embeddings.
+
+        *rows* is a list of ``(node_id, float32_bytes)`` pairs where the
+        bytes are the raw output of ``np.ndarray.tobytes()`` on a
+        unit-normalised float32 row vector. Wiping and reinserting under one
+        write keeps the embedding table consistent with a full re-encode.
+        """
+        async with self._writing():
+            await self._conn.execute("DELETE FROM node_embeddings")
+            for node_id, vec_bytes in rows:
+                await self._conn.execute(
+                    "INSERT INTO node_embeddings(node_id, vector) "
+                    "VALUES(?, ?)",
+                    (node_id, vec_bytes),
+                )
+
+    async def get_embedding_rows(self) -> list[dict[str, Any]]:
+        """
+        Return all stored embeddings joined with their node metadata.
+
+        Each row carries ``node_id``, ``vector`` (raw bytes), ``kind``,
+        ``name``, ``qualified_name``, and ``file_path``. The JOIN filters
+        out dangling rows whose node was deleted since the last full index.
+        Ordered by ``node_id`` for a stable, reproducible matrix layout.
+        """
+        sql = """
+        SELECT ne.node_id, ne.vector,
+               n.kind, n.name, n.qualified_name, n.file_path
+        FROM node_embeddings ne
+        JOIN nodes n ON n.id = ne.node_id
+        ORDER BY ne.node_id
+        """
+        async with self._read_conn.execute(sql) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Cluster storage / queries
+    # ------------------------------------------------------------------
+
+    async def replace_clusters(
+        self,
+        clusters: list[dict[str, Any]],
+        assignments: list[dict[str, Any]],
+    ) -> None:
+        """
+        Atomically replace the whole cluster set and node→cluster mapping.
+
+        *clusters* rows carry ``id``/``label``/``size``/``terms`` (terms is
+        a list, stored as JSON); *assignments* rows carry
+        ``node_id``/``cluster_id``/``score``. Wiping and re-inserting under
+        one write keeps the cluster view consistent with a single full
+        recompute (clusters are a regenerable cache, never migrated).
+        """
+        async with self._writing():
+            await self._conn.execute("DELETE FROM node_clusters")
+            await self._conn.execute("DELETE FROM clusters")
+            for c in clusters:
+                await self._conn.execute(
+                    "INSERT INTO clusters(id, label, size, terms) "
+                    "VALUES(?, ?, ?, ?)",
+                    (
+                        c["id"],
+                        c["label"],
+                        c["size"],
+                        json.dumps(c.get("terms", [])),
+                    ),
+                )
+            for a in assignments:
+                await self._conn.execute(
+                    "INSERT OR REPLACE INTO "
+                    "node_clusters(node_id, cluster_id, score) "
+                    "VALUES(?, ?, ?)",
+                    (a["node_id"], a["cluster_id"], a.get("score")),
+                )
+
+    async def clear_clusters(self) -> None:
+        """Drop all cluster rows and assignments (e.g. before a recompute)."""
+        async with self._writing():
+            await self._conn.execute("DELETE FROM node_clusters")
+            await self._conn.execute("DELETE FROM clusters")
+
+    async def cluster_count(self) -> int:
+        """Return the number of stored clusters."""
+        async with self._read_conn.execute(
+            "SELECT COUNT(*) FROM clusters"
+        ) as cur:
+            row = await cur.fetchone()
+        return row[0] if row else 0
+
+    async def list_clusters(
+        self, min_size: int = 1, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return clusters with at least *min_size* members, largest first."""
+        sql = """
+        SELECT id, label, size, terms FROM clusters
+        WHERE size >= :min_size
+        ORDER BY size DESC, id ASC
+        LIMIT :limit
+        """
+        async with self._read_conn.execute(
+            sql, {"min_size": min_size, "limit": limit}
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_cluster(self, cluster_id: int) -> dict[str, Any] | None:
+        """Return a single cluster row (id/label/size/terms) or None."""
+        async with self._read_conn.execute(
+            "SELECT id, label, size, terms FROM clusters WHERE id = ?",
+            (cluster_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def get_cluster_members(
+        self, cluster_id: int, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """
+        Return the member nodes of *cluster_id*, tightest-fit first.
+
+        Joins through ``nodes`` so members whose node has since vanished
+        (a dangling assignment after a delete) are filtered out, matching
+        the read-time integrity model used by the edge queries.
+        """
+        sql = """
+        SELECT n.id, n.kind, n.qualified_name, n.name, n.file_path, nc.score
+        FROM node_clusters nc
+        JOIN nodes n ON n.id = nc.node_id
+        WHERE nc.cluster_id = :cid
+        ORDER BY nc.score DESC NULLS LAST, n.qualified_name ASC
+        LIMIT :limit
+        """
+        async with self._read_conn.execute(
+            sql, {"cid": cluster_id, "limit": limit}
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_cluster_id_for_node(self, node_id: str) -> int | None:
+        """Return the cluster id a node belongs to, or None if unclustered."""
+        async with self._read_conn.execute(
+            "SELECT cluster_id FROM node_clusters WHERE node_id = ?",
+            (node_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return row["cluster_id"] if row else None
 
 
 # ------------------------------------------------------------------

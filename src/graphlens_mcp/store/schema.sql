@@ -53,3 +53,36 @@ CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
   qualified_name,
   node_id UNINDEXED
 );
+
+-- Node embeddings: float32 vectors produced by model2vec (potion-code-16M),
+-- stored as raw bytes (tobytes()) for fast in-process cosine similarity search.
+-- A full index writes all embeddings; an incremental edit marks the in-memory
+-- cache stale (reloaded lazily on next search from these rows). No foreign key
+-- to nodes(id) — the same dangling-tolerance reason as edges.
+CREATE TABLE IF NOT EXISTS node_embeddings (
+  node_id TEXT PRIMARY KEY,
+  vector  BLOB NOT NULL
+);
+
+-- Semantic clusters: groups of semantically-related symbols, recomputed from
+-- node embeddings during a full index (see indexer/semantic.py). Like the rest
+-- of the graph this is a regenerable cache — a schema change drops and rebuilds
+-- it rather than migrating, and an incremental edit marks it stale (recomputed
+-- lazily on the next cluster query).
+CREATE TABLE IF NOT EXISTS clusters (
+  id     INTEGER PRIMARY KEY,
+  label  TEXT NOT NULL,       -- short human label derived from member symbols
+  size   INTEGER NOT NULL,    -- number of member nodes
+  terms  TEXT                 -- JSON array of the cluster's top descriptive terms
+);
+
+-- A node belongs to at most one cluster (PRIMARY KEY on node_id). No foreign key
+-- to nodes(id) for the same dangling-tolerance reason as edges: a cluster row may
+-- briefly outlive a node mid-reindex; unresolved members are filtered at read time.
+CREATE TABLE IF NOT EXISTS node_clusters (
+  node_id    TEXT PRIMARY KEY,
+  cluster_id INTEGER NOT NULL,
+  score      REAL              -- similarity to the cluster centroid (higher = tighter)
+);
+
+CREATE INDEX IF NOT EXISTS idx_node_clusters_cluster ON node_clusters(cluster_id);

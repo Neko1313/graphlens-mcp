@@ -1,4 +1,4 @@
-"""FastMCP server with 8 graph navigation tools."""
+"""FastMCP server: graph navigation + optional semantic search/clusters."""
 
 from __future__ import annotations
 
@@ -17,18 +17,27 @@ from graphlens_mcp.indexer.workspace import Workspace
 # TYPE_CHECKING that eval raises NameError and the server fails to start, so
 # the agent reports it "cannot connect". noqa: TC001 stops ruff re-hiding it.
 from graphlens_mcp.server.models import (  # noqa: TC001
+    ClusterInfo,
+    ClusterList,
+    CodeSearchResult,
     FileStructureResult,
     GraphResult,
     NodeInfoResult,
+    SemanticResult,
 )
 from graphlens_mcp.server.tools import (
     tool_find_references,
+    tool_find_related,
     tool_get_callees,
     tool_get_callers,
+    tool_get_cluster,
     tool_get_cross_language_calls,
     tool_get_file_structure,
     tool_get_neighbors,
     tool_get_node_info,
+    tool_list_clusters,
+    tool_search_code,
+    tool_search_semantic,
     tool_search_symbols,
 )
 
@@ -52,11 +61,19 @@ def create_mcp(store: SqliteStore, workspace: Workspace) -> FastMCP:
     mcp = FastMCP(
         "graphlens",
         instructions=(
-            "Semantic code graph for the current project. "
-            "Use search_symbols first, then navigate with "
-            "get_callers/get_callees. "
-            "Each response includes resolver_status: ok|degraded|skeleton — "
-            "treat skeleton/degraded results as approximate."
+            "Semantic code graph for the current project — prefer these "
+            "tools over raw grep/file reads.\n"
+            "- Know the name? search_symbols, then get_callers/get_callees "
+            "for impact analysis.\n"
+            "- Describe behavior? search_semantic finds code by meaning and "
+            "returns node ids to pivot into the graph.\n"
+            "- Raw text (strings, logs, comments, config)? search_code is the "
+            "grep replacement.\n"
+            "- Orienting in an unfamiliar repo? list_clusters / get_cluster "
+            "map semantic zones; find_related finds similar code.\n"
+            "Each graph response includes resolver_status: ok|degraded — "
+            "treat degraded results as approximate. Semantic tools report "
+            "available=false when the optional [semantic] extra is missing."
         ),
     )
 
@@ -162,6 +179,75 @@ def create_mcp(store: SqliteStore, workspace: Workspace) -> FastMCP:
             store, workspace, node_id, limit
         )
 
+    @mcp.tool(
+        description=(
+            "Search file CONTENT by regex/text — the grep replacement. "
+            "Use for string literals, log/error messages, comments, TODOs, "
+            "and config values that symbol search cannot see. For 'where is "
+            "X defined / who calls it', prefer search_symbols + get_callers."
+        )
+    )
+    async def search_code(
+        pattern: str,
+        path_glob: str | None = None,
+        ignore_case: bool = False,
+        limit: Limit = 100,
+    ) -> CodeSearchResult:
+        return await tool_search_code(
+            workspace,
+            pattern,
+            path_glob=path_glob,
+            ignore_case=ignore_case,
+            limit=limit,
+        )
+
+    @mcp.tool(
+        description=(
+            "Search the codebase by MEANING (natural language or code-like "
+            "query) when you don't know the exact name. Each hit carries the "
+            "graph node ids it overlaps, so you can pivot into "
+            "get_callers/get_callees. Reports available=false if the "
+            "[semantic] extra is not installed."
+        )
+    )
+    async def search_semantic(query: str, limit: Limit = 10) -> SemanticResult:
+        return await tool_search_semantic(store, workspace, query, limit)
+
+    @mcp.tool(
+        description=(
+            "Find code semantically SIMILAR to a given symbol (by node_id). "
+            "Returns resembling chunks bridged back to graph nodes — 'find "
+            "other places that do something like this'. Requires the "
+            "[semantic] extra."
+        )
+    )
+    async def find_related(node_id: str, limit: Limit = 5) -> SemanticResult:
+        return await tool_find_related(store, workspace, node_id, limit)
+
+    @mcp.tool(
+        description=(
+            "List the codebase's semantic CLUSTERS — labeled zones of related "
+            "symbols (auth, serialization, …). Use to orient in an unfamiliar "
+            "repo, then get_cluster to drill in. Requires the [semantic] "
+            "extra."
+        )
+    )
+    async def list_clusters(
+        min_size: int = 2, limit: Limit = 50
+    ) -> ClusterList:
+        return await tool_list_clusters(store, workspace, min_size, limit)
+
+    @mcp.tool(
+        description=(
+            "Show the semantic cluster a symbol (node_id) belongs to and its "
+            "sibling members — the semantic neighborhood around a symbol, "
+            "complementing the structural get_neighbors. Requires the "
+            "[semantic] extra."
+        )
+    )
+    async def get_cluster(node_id: str, limit: Limit = 50) -> ClusterInfo:
+        return await tool_get_cluster(store, workspace, node_id, limit)
+
     return mcp
 
 
@@ -186,6 +272,9 @@ def run_server(
             # down, then let the watcher keep the graph fresh from here on.
             # Inside the try so close() still runs if reconcile/watch fails.
             await workspace.reconcile()
+            # Finish a semantic/cluster build that a prior run's crash left
+            # unfinished (no-op when the last index completed cleanly).
+            await workspace.resume_pending_index()
             if watch:
                 workspace.start_watching()
             await mcp.run_stdio_async()

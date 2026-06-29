@@ -52,6 +52,12 @@ tasks:
 
   test:
     desc: Run the test suite with coverage
+    # Keep the embedding model off the network: the semantic tests drive the
+    # real code paths with a monkeypatched model and assert the offline-degrade
+    # behavior, so a CI run must never try to download potion-code-16M (which
+    # would be slow and flaky). Tests that need a live model are skipped.
+    env:
+      HF_HUB_OFFLINE: "1"
     cmds:
       - uv run pytest --cov=src --cov-report=term-missing
 
