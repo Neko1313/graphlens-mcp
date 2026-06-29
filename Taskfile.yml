@@ -15,12 +15,9 @@ tasks:
     silent: true
 
   install:
-    desc: Sync the virtualenv with all dependency groups + the semantic extra
-    # The semantic extra is included so the dev/CI environment type-checks and
-    # tests the optional semantic layer (semble + scikit-learn). The package
-    # itself still ships it as an opt-in extra; this only affects tooling.
+    desc: Sync the virtualenv with all dependency groups
     cmds:
-      - uv sync --all-groups --extra semantic
+      - uv sync --all-groups
 
   lint:
     desc: Lint with ruff (curated ruleset in ruff.toml)
