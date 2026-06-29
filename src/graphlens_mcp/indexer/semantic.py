@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
     from graphlens_mcp.store.sqlite_store import SqliteStore
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ _INSTALL_HINT = (
 
 def semantic_availability() -> Availability:
     """
-    Report whether the ``[semantic]`` extra (model2vec + sklearn) is importable.
+    Report whether the ``[semantic]`` extra is importable.
 
     Checks only that the heavy packages import — not that the embedding
     model can be fetched, which is discovered (and reported) at build/query
@@ -186,7 +187,7 @@ class SemanticIndex:
     every method returns a structured reason rather than raising.
     """
 
-    def __init__(self) -> None:
+    def __init__(self) -> None:  # noqa: D107
         self._dirty = True
         self._lock = asyncio.Lock()
         # Sticky reason once the model proves unreachable — avoids retrying a
@@ -203,7 +204,7 @@ class SemanticIndex:
 
     @property
     def availability(self) -> Availability:
-        """Import-level availability (extra installed?) plus any runtime error."""
+        """Import-level availability plus any runtime error."""
         base = semantic_availability()
         if not base.ok:
             return base
@@ -278,7 +279,7 @@ class SemanticIndex:
                 return Availability(ok=False, reason=reason)
 
     def _load_blocking(self, rows: list[dict[str, Any]]) -> None:
-        """Deserialize stored bytes into the in-memory numpy cache (blocking)."""
+        """Deserialize stored bytes into the numpy cache (blocking)."""
         import numpy as np  # noqa: PLC0415
 
         if not rows:
@@ -481,7 +482,7 @@ def _find_related_blocking(
     node_ids: list[str],
     node_meta: list[dict[str, Any]],
 ) -> list[SemanticHit]:
-    """Find the top_k nodes most similar to *vectors[source_idx]* (blocking)."""
+    """Find top_k nodes most similar to *vectors[source_idx]* (blocking)."""
     import numpy as np  # noqa: PLC0415
 
     qvec = vectors[source_idx]
@@ -511,7 +512,7 @@ def _cluster_blocking(
     node_meta: list[dict[str, Any]],
     vectors: Any,
 ) -> ClusterComputation:
-    """HDBSCAN-cluster *vectors* and assemble labeled cluster rows (blocking)."""
+    """HDBSCAN-cluster *vectors*, assemble labeled cluster rows (blocking)."""
     from sklearn.cluster import HDBSCAN  # noqa: PLC0415
 
     labels = HDBSCAN(
