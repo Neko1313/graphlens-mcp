@@ -18,6 +18,11 @@ const sidebars: SidebarsConfig = {
       label: "Reference",
       items: ["agent-tools", "architecture"],
     },
+    {
+      type: "category",
+      label: "Design",
+      items: ["design/semantic-search"],
+    },
   ],
 };
 

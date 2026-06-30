@@ -22,14 +22,24 @@ details only after you have a node ID.
 ## Decision tree: how to start
 
 ```
+Investigating one symbol (what is it / who calls it / what implements it)?
+  → explore("name")   # ONE call: source + callers + callees + implementors + refs
+
 Do you know the exact symbol name?
   YES → Is it short/common (User, Config, get)?
           YES → get_file_structure(path) if you know the file, else search_symbols("pkg.ClassName")
-          NO  → search_symbols("SymbolName")  # distinctive compound names work well
+          NO  → pass the name straight to the relation tool you need —
+                get_callers("SymbolName") / get_node_info("SymbolName") etc.
+                accept a NAME, not only a node_id (no search_symbols round-trip)
   NO  → Can you describe the behavior in words?
           YES → search_semantic("description of behavior")   # primary discovery tool
           NO  → list_clusters()  # orient in unfamiliar repo by semantic zones
 ```
+
+**Relation tools accept a node id OR a symbol name.** `get_callers`,
+`get_callees`, `get_implementors`, `find_references`, `get_neighbors` and
+`get_node_info` resolve a bare name to the best-matching node internally — so
+prefer `get_callers("create_order")` over chaining `search_symbols` first.
 
 ## Replacing common tools
 
@@ -40,8 +50,9 @@ Do you know the exact symbol name?
 | `cat file.py \| grep def` | `get_file_structure("path/to/file.py")` |
 | `ls src/authz/` | `search_symbols("authz.")` — qualified prefix |
 | `grep -r "authentication"` to find auth code | `search_semantic("authentication")` |
+| `grep -r "Interface"` to find implementations | `get_implementors("Interface")` — never guess from grep |
 | Read whole file to find a function | `get_file_structure(file)` → `get_node_info(id)` |
-| Read file to find callers | `get_callers(id)` — no file reads needed |
+| Read file to find callers | `get_callers("name")` — no file reads, no prior lookup |
 
 ## Searching effectively
 
@@ -73,7 +84,9 @@ TODOs, config values, SQL fragments, URLs.
 - Dots: `"os\\.path"` not `"os.path"`
 - When in doubt, use a distinctive substring without specials: `"needle-in-haystack"`
 
-Use `path_glob` to scope: `search_code("def ", path_glob="*.py")`.
+Scope with `path_glob`: a glob `search_code("def ", path_glob="*.py")` or a
+**bare directory** `search_code("TODO", path_glob="src/auth")` (expanded to
+`src/auth/**`). `search_symbols` takes the same `path_glob` to restrict by subtree.
 
 ### get_file_structure — file outline (NOT directory)
 - Takes a **file** path only — a directory path returns empty (`degraded` or empty list).
@@ -86,6 +99,7 @@ Use `path_glob` to scope: `search_code("def ", path_glob="*.py")`.
 
 | Question | Tool | Input |
 |---|---|---|
+| Understand a symbol fast (source + who uses it + what implements it) | `explore` | `"create_order"` |
 | Where is `create_order` defined? | `search_symbols` | `"create_order"` |
 | Where is `Location` defined? (common noun) | `get_file_structure` | known file path |
 | Find auth-related code (no name) | `search_semantic` | `"authentication flow"` |
@@ -93,6 +107,7 @@ Use `path_glob` to scope: `search_code("def ", path_glob="*.py")`.
 | What's in the `authz/` directory? | `search_symbols` | `"authz."` |
 | What does `create_order` call internally? | `get_callees` | node_id, depth=2 |
 | Who calls `create_order`? (impact) | `get_callers` | node_id, depth=3 |
+| **What implements / extends / subclasses `X`?** | `get_implementors` | node_id |
 | What references `OrderService`? (type annotations) | `find_references` | node_id |
 | Show source + signature of a symbol | `get_node_info` | node_id |
 | Find a string literal / log / comment | `search_code` | escaped regex pattern |
@@ -105,10 +120,10 @@ Use `path_glob` to scope: `search_code("def ", path_glob="*.py")`.
 ## Impact analysis workflow
 
 When asked "what breaks if I change X?":
-1. `search_symbols("X")` or `search_semantic("X behavior")` → get node ID
-2. `get_callers(id, max_depth=5)` → direct and transitive callers
-3. `find_references(id)` → non-call usages (type annotations, assignments)
-4. `get_cross_language_calls(id)` → cross-service consumers
+1. `get_callers("X", max_depth=5)` → direct and transitive callers (pass the
+   name directly; use `search_semantic("X behavior")` first only if unsure of the name)
+2. `find_references("X")` → non-call usages (type annotations, assignments)
+3. `get_cross_language_calls(id)` → cross-service consumers
 5. Summarise affected symbols — do **not** read every caller file; use
    `get_node_info` only for ones that need elaboration.
 
@@ -129,7 +144,19 @@ Each response includes `resolver_status` across all returned nodes' files:
   treat edges as approximate, supplement with `search_code` for confirmation
 
 When `degraded`, say so and suggest `graphlens-mcp reindex` or installing the
-missing language toolchain (e.g. `pyright`, `typescript`).
+missing language toolchain (e.g. Node.js for TypeScript, the Go toolchain for Go,
+rust-analyzer for Rust — Python ships its `ty` engine bundled).
+
+## Respect indexing
+
+Responses also carry `indexing` (boolean). `indexing: true` means a (re)index is
+still running, so the graph is **incomplete right now** — an empty `get_callers`,
+a missing edge, or a not-found symbol may simply be unindexed yet.
+
+- **Do NOT** conclude a symbol is unused, unreferenced, dead, or safe to delete
+  while `indexing: true`. Say the index is still building and retry shortly.
+- This happens mainly right after the server starts (it serves immediately and
+  catches up in the background) or just after large edits.
 
 ## Hard rules
 
@@ -140,3 +167,5 @@ missing language toolchain (e.g. `pyright`, `typescript`).
 - **Never** pass a directory to `get_file_structure` — it returns empty
 - **Escape** regex metacharacters in `search_code` patterns
 - **Don't assume** an edge list is complete when `resolver_status != ok`
+- **Don't conclude "unused / dead / safe to delete"** when `indexing: true` —
+  the graph is still building; retry shortly

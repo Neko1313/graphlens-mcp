@@ -46,6 +46,15 @@ _MAX_CLUSTER_NODES = 50_000
 _SIGNATURE_KEYS = ("signature", "sig")
 _DOCSTRING_KEYS = ("docstring", "doc", "documentation")
 
+# Embedding-text budget. Many nodes (Go/Rust methods especially) carry no
+# signature or docstring in metadata, so embedding only the name is weak — we
+# also fold in a bounded snippet of the actual source body, which is the
+# strongest signal for search-by-meaning.
+_MAX_EMBED_CHARS = 1500
+_MAX_BODY_LINES = 12
+_MAX_BODY_CHARS = 600
+_MAX_DOC_CHARS = 300
+
 _LABEL_STOPWORDS = frozenset(
     {
         "get",
@@ -420,7 +429,11 @@ def _embed_blocking(
 ) -> tuple[Any, list[tuple[str, bytes]]]:
     """Embed *nodes*; return (model, (node_id, float32_bytes) pairs)."""
     model = model2vec.StaticModel.from_pretrained(MODEL_ID)
-    texts = [_embedding_text(n) for n in nodes]
+    # Per-build file cache: each source file is read once even though many
+    # nodes share it. Local to this call so a later rebuild re-reads from disk
+    # (never serving stale source after an edit).
+    file_cache: dict[str, list[str]] = {}
+    texts = [_embedding_text(n, file_cache) for n in nodes]
     vectors = np.asarray(model.encode(texts), dtype=np.float32)
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
@@ -548,19 +561,66 @@ def _first_meta(
     return None
 
 
-def _embedding_text(node: dict[str, Any]) -> str:
-    """Build the text to embed for a node: name + signature + docstring."""
-    parts: list[str] = [
-        str(node.get("qualified_name") or node.get("name") or "")
-    ]
+def _node_body(
+    node: dict[str, Any], file_cache: dict[str, list[str]]
+) -> str | None:
+    """Read a bounded snippet of the node's source body (cached per file)."""
+    path = node.get("file_path")
+    span = node.get("span_json")
+    if not path or not span:
+        return None
+    try:
+        start_line, _, end_line, _ = json.loads(span)
+    except (ValueError, TypeError):
+        return None
+    lines = file_cache.get(path)
+    if lines is None:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            lines = []
+        file_cache[path] = lines
+    if not lines:
+        return None
+    end = min(end_line, start_line + _MAX_BODY_LINES - 1)
+    snippet = "".join(lines[start_line - 1 : end]).strip()
+    return snippet[:_MAX_BODY_CHARS] or None
+
+
+def _embedding_text(
+    node: dict[str, Any], file_cache: dict[str, list[str]] | None = None
+) -> str:
+    """
+    Build the text to embed for a node.
+
+    Folds together the qualified name (plus its split identifier tokens, which
+    help a static model match natural-language queries), the node kind, the
+    signature and docstring when present, and a bounded snippet of the actual
+    source body — the body is the strongest signal for nodes that carry no
+    docstring/signature in metadata.
+    """
+    qn = str(node.get("qualified_name") or node.get("name") or "")
+    kind = str(node.get("kind") or "")
+    parts: list[str] = [f"{kind} {qn}".strip()]
+
+    name = str(node.get("name") or "")
+    tokens = _split_identifier(name)
+    if len(tokens) > 1:
+        parts.append(" ".join(tokens))
+
     sig = _first_meta(node.get("metadata_json"), _SIGNATURE_KEYS)
     if sig:
         parts.append(sig)
     doc = _first_meta(node.get("metadata_json"), _DOCSTRING_KEYS)
     if doc:
-        # Keep the embedding focused on the summary line of the docstring.
-        parts.append(doc.strip().splitlines()[0][:200])
-    return "\n".join(p for p in parts if p)
+        parts.append(doc.strip()[:_MAX_DOC_CHARS])
+    if file_cache is not None:
+        body = _node_body(node, file_cache)
+        if body:
+            parts.append(body)
+
+    return "\n".join(p for p in parts if p)[:_MAX_EMBED_CHARS]
 
 
 def _split_identifier(name: str) -> list[str]:

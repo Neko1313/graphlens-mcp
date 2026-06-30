@@ -11,6 +11,7 @@ lookups that touch a file trigger the on-access freshness check first.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import re
 from pathlib import Path
@@ -27,6 +28,7 @@ from graphlens_mcp.server.models import (
     ClusterList,
     CodeMatch,
     CodeSearchResult,
+    ExploreResult,
     FileStructureResult,
     GraphResult,
     NodeInfoResult,
@@ -51,6 +53,39 @@ _GREP_EXCLUDED = frozenset(
 # ripgrep's exit code for a fatal error (e.g. an invalid regex); exit 1 means
 # "no matches" which is not an error.
 _RG_ERROR_EXIT = 2
+
+
+def _norm_path_glob(glob: str | None) -> str | None:
+    """
+    Normalize a path filter so agents can pass a bare directory.
+
+    A value with no glob metacharacter (``* ? [``) is treated as a directory
+    and expanded to ``<dir>/**`` — so ``"src/auth"`` scopes to everything under
+    it. Values that already look like a glob (``"*.py"``, ``"src/**/*.go"``)
+    pass through unchanged.
+    """
+    if not glob:
+        return None
+    g = glob.strip()
+    if not g:
+        return None
+    if not any(c in g for c in "*?["):
+        g = g.rstrip("/") + "/**"
+    return g
+
+
+def _path_matches(file_path: str | None, glob: str | None) -> bool:
+    """Report whether *file_path* satisfies *glob* (dir-normalized)."""
+    g = _norm_path_glob(glob)
+    if g is None:
+        return True
+    if not file_path:
+        return False
+    if "/" not in g:
+        return fnmatch.fnmatch(file_path.rsplit("/", 1)[-1], g)
+    return fnmatch.fnmatch(file_path, g) or fnmatch.fnmatch(
+        file_path, "*/" + g
+    )
 
 
 def _read_span(path: str | None, span_json: str | None) -> str | None:
@@ -106,12 +141,15 @@ async def tool_search_symbols(
     store: SqliteStore,
     query: str,
     limit: int = 20,
+    path_glob: str | None = None,
 ) -> GraphResult:
     """
     Search for symbols by name across the whole codebase.
 
-    Returns node IDs for use with get_node_info / get_callers /
-    get_callees. Supports FTS5 prefix syntax (``create_order*``).
+    Returns node IDs (also accepted by name) for get_node_info /
+    get_callers / get_callees / explore. Supports FTS5 prefix syntax
+    (``create_order*``). Scope to part of the tree with *path_glob* —
+    a glob (``"*.py"``, ``"src/**"``) or a bare directory (``"src/auth"``).
 
     **Short or common names rank poorly** — dozens of imports and file
     nodes share them. Use the most distinctive form available: a
@@ -124,7 +162,13 @@ async def tool_search_symbols(
     find the real definition.  When you don't know the name at all,
     use ``search_semantic`` instead.
     """
-    rows = await store.search_symbols(query, limit=limit)
+    # Over-fetch when filtering so the path scope doesn't starve the result.
+    fetch = limit if path_glob is None else max(limit, MAX_RESULTS)
+    rows = await store.search_symbols(query, limit=fetch)
+    if path_glob is not None:
+        rows = [
+            r for r in rows if _path_matches(r.get("file_path"), path_glob)
+        ]
     refs, truncated = to_refs(rows, limit)
     # Aggregate over the full result set (pre-cap) so a degraded file truncated
     # out of the response still lowers the reported status.
@@ -150,9 +194,17 @@ async def tool_get_node_info(
     adapter recorded them in node metadata; ``source`` is always read
     live from disk for the node's span.
     """
-    node = await store.get_node(node_id)
+    resolved = await _resolve_node_id(store, node_id)
+    if resolved is None:
+        return NodeInfoResult(
+            error=_NO_NODE.format(ref=node_id), indexing=workspace.is_indexing
+        )
+    node = await store.get_node(resolved)
     if node is None:
-        return NodeInfoResult(error=f"Node {node_id!r} not found")
+        return NodeInfoResult(
+            error=_NO_NODE.format(ref=node_id), indexing=workspace.is_indexing
+        )
+    node_id = resolved
 
     status = await _fresh_status(workspace, node)
     node = await store.get_node(node_id) or node
@@ -163,6 +215,7 @@ async def tool_get_node_info(
         signature=_first_meta(node.get("metadata_json"), _SIGNATURE_KEYS),
         docstring=_first_meta(node.get("metadata_json"), _DOCSTRING_KEYS),
         resolver_status=status,
+        indexing=workspace.is_indexing,
     )
 
 
@@ -190,23 +243,68 @@ async def tool_get_file_structure(
     rows = await store.get_nodes_in_file(abs_path)
     refs, truncated = to_refs(rows, limit)
     return FileStructureResult(
-        path=abs_path, nodes=refs, resolver_status=status, truncated=truncated
+        path=abs_path,
+        nodes=refs,
+        resolver_status=status,
+        truncated=truncated,
+        indexing=workspace.is_indexing,
     )
+
+
+# Steering error: tells the agent how to recover instead of just failing.
+_NO_NODE = (
+    "No node or symbol matches {ref!r}. Pass a node id from search_symbols "
+    "or explore, or a distinctive symbol name (a compound or qualified name)."
+)
+
+
+def _pick_node(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Prefer a locally-defined node (file_path set) over an external stub."""
+    return next((r for r in rows if r.get("file_path")), rows[0])
+
+
+async def _resolve_node_id(store: SqliteStore, ref: str) -> str | None:
+    """
+    Resolve *ref* — a node id OR a symbol name — to a node id.
+
+    Tools accept either so the agent can call e.g.
+    ``get_callers("create_order")`` directly without a separate
+    search_symbols round-trip. Resolution order: exact node id, then an
+    exact-case name match (so ``ResponseWriter`` picks the interface, not the
+    FTS-adjacent ``responseWriter`` struct), then the best FTS match. Returns
+    None if nothing matches.
+    """
+    if not ref:
+        return None
+    if await store.get_node(ref) is not None:
+        return ref
+    exact = await store.find_nodes_by_exact_name(ref)
+    if exact:
+        return _pick_node(exact)["id"]
+    rows = await store.search_symbols(ref, limit=1)
+    return rows[0]["id"] if rows else None
 
 
 async def _walk_tool(
     store: SqliteStore,
     workspace: Workspace,
-    node_id: str,
-    query: Callable[[], Awaitable[list[dict[str, Any]]]],
+    ref: str,
+    query: Callable[[str], Awaitable[list[dict[str, Any]]]],
     *,
     limit: int,
 ) -> GraphResult:
+    node_id = await _resolve_node_id(store, ref)
+    if node_id is None:
+        return GraphResult(
+            error=_NO_NODE.format(ref=ref), indexing=workspace.is_indexing
+        )
     node = await store.get_node(node_id)
-    if node is None:
-        return GraphResult(error=f"Node {node_id!r} not found")
+    if node is None:  # resolved id vanished between resolve and fetch (a race)
+        return GraphResult(
+            error=_NO_NODE.format(ref=ref), indexing=workspace.is_indexing
+        )
     base = await _fresh_status(workspace, node)
-    rows = await query()
+    rows = await query(node_id)
     refs, truncated = to_refs(rows, limit)
     status = await _aggregate_status(store, base, rows)
     return GraphResult(
@@ -214,6 +312,7 @@ async def _walk_tool(
         count=len(refs),
         resolver_status=status,
         truncated=truncated,
+        indexing=workspace.is_indexing,
     )
 
 
@@ -234,7 +333,7 @@ async def tool_get_callees(
         store,
         workspace,
         node_id,
-        lambda: store.get_callees(node_id, max_depth=depth),
+        lambda nid: store.get_callees(nid, max_depth=depth),
         limit=limit,
     )
 
@@ -256,7 +355,7 @@ async def tool_get_callers(
         store,
         workspace,
         node_id,
-        lambda: store.get_callers(node_id, max_depth=depth),
+        lambda nid: store.get_callers(nid, max_depth=depth),
         limit=limit,
     )
 
@@ -278,7 +377,7 @@ async def tool_get_neighbors(
         store,
         workspace,
         node_id,
-        lambda: store.get_neighbors(node_id, depth=hops),
+        lambda nid: store.get_neighbors(nid, depth=hops),
         limit=limit,
     )
 
@@ -299,8 +398,92 @@ async def tool_find_references(
         store,
         workspace,
         node_id,
-        lambda: store.find_references(node_id),
+        store.find_references,
         limit=limit,
+    )
+
+
+async def tool_get_implementors(
+    store: SqliteStore,
+    workspace: Workspace,
+    node_id: str,
+    max_depth: int = 5,
+    limit: int = 200,
+) -> GraphResult:
+    """
+    Return nodes that inherit from / implement node_id (subtypes).
+
+    The reverse of inheritance: subclasses, interface implementors and
+    embedders. THE tool for "what implements / extends / subclasses X?".
+    """
+    depth = min(max_depth, 10)
+    return await _walk_tool(
+        store,
+        workspace,
+        node_id,
+        lambda nid: store.get_implementors(nid, max_depth=depth),
+        limit=limit,
+    )
+
+
+async def tool_explore(
+    store: SqliteStore,
+    workspace: Workspace,
+    query: str,
+    limit: int = 20,
+) -> ExploreResult:
+    """
+    Resolve a symbol and return its definition plus immediate relations.
+
+    One call answers "what is X, who uses it, what implements it": it
+    searches for the symbol, reads the best match's source/signature, and
+    bundles its direct callers, callees, implementors and references — so the
+    agent rarely needs to chain search_symbols -> get_node_info -> get_callers.
+    """
+    rows = await store.search_symbols(query, limit=limit)
+    if not rows:
+        return ExploreResult(
+            error=(
+                f"No symbol matches {query!r}. Try a shorter or partial name, "
+                "or search_code to grep for the term in source."
+            ),
+            indexing=workspace.is_indexing,
+        )
+    top = rows[0]
+    node_id = top["id"]
+    node = await store.get_node(node_id) or top
+    base = await _fresh_status(workspace, node)
+    node = await store.get_node(node_id) or node
+
+    # One shallow hop of each relation; small caps keep the response lean.
+    rel_cap = min(limit, 25)
+    callers = await store.get_callers(node_id, max_depth=1)
+    callees = await store.get_callees(node_id, max_depth=1)
+    implementors = await store.get_implementors(node_id, max_depth=2)
+    references = await store.find_references(node_id)
+
+    caller_refs, t1 = to_refs(callers, rel_cap)
+    callee_refs, t2 = to_refs(callees, rel_cap)
+    impl_refs, t3 = to_refs(implementors, rel_cap)
+    ref_refs, t4 = to_refs(references, rel_cap)
+    cand_refs, _ = to_refs(rows[1:], 10)
+
+    status = await _aggregate_status(
+        store, base, callers + callees + implementors + references
+    )
+    return ExploreResult(
+        node=NodeRef.from_row(node),
+        source=_read_span(node.get("file_path"), node.get("span_json")),
+        signature=_first_meta(node.get("metadata_json"), _SIGNATURE_KEYS),
+        docstring=_first_meta(node.get("metadata_json"), _DOCSTRING_KEYS),
+        callers=caller_refs,
+        callees=callee_refs,
+        implementors=impl_refs,
+        references=ref_refs,
+        candidates=cand_refs,
+        resolver_status=status,
+        truncated=t1 or t2 or t3 or t4,
+        indexing=workspace.is_indexing,
     )
 
 
@@ -321,7 +504,7 @@ async def tool_get_cross_language_calls(
         store,
         workspace,
         node_id,
-        lambda: store.get_cross_language_calls(node_id),
+        store.get_cross_language_calls,
         limit=limit,
     )
 
@@ -349,21 +532,23 @@ async def tool_search_code(
     *pattern* is a PCRE regular expression (ripgrep).  Escape regex
     metacharacters for literal searches — parentheses, brackets, dots,
     ``*``, ``+`` must be escaped: ``foo\\(bar\\)``, ``os\\.path``.
-    Use *path_glob* to scope to a file subset (e.g. ``"*.py"``).
+    Scope with *path_glob*: a glob like ``"*.py"`` or ``"src/**/*.go"``,
+    or a **bare directory** like ``"src/auth"`` (expanded to ``src/auth/**``).
 
     Use for: string literals, log/error messages, comments, TODOs,
     config values, or raw-text patterns the symbol graph cannot answer.
     For symbol-level questions ("where is X defined / who calls it?")
-    prefer ``search_symbols`` + ``get_callers`` — they are precise and
-    name-resolved.  Honors .gitignore; skips vendored/build dirs.
+    prefer ``search_symbols`` + ``get_callers`` or ``explore`` — they are
+    precise and name-resolved.  Honors .gitignore; skips vendored dirs.
     """
+    glob = _norm_path_glob(path_glob)
     cap = min(limit, MAX_RESULTS)
     root = workspace.project_root
     try:
         matches, truncated = await _ripgrep(
             root,
             pattern,
-            path_glob=path_glob,
+            path_glob=glob,
             ignore_case=ignore_case,
             cap=cap,
         )
@@ -371,14 +556,19 @@ async def tool_search_code(
         # No ripgrep binary — fall back to a pure-Python scan.
         try:
             matches, truncated = await asyncio.to_thread(
-                _python_grep, root, pattern, path_glob, ignore_case, cap
+                _python_grep, root, pattern, glob, ignore_case, cap
             )
         except _GrepError as exc:
-            return CodeSearchResult(error=str(exc))
+            return CodeSearchResult(
+                error=str(exc), indexing=workspace.is_indexing
+            )
     except _GrepError as exc:
-        return CodeSearchResult(error=str(exc))
+        return CodeSearchResult(error=str(exc), indexing=workspace.is_indexing)
     return CodeSearchResult(
-        matches=matches, count=len(matches), truncated=truncated
+        matches=matches,
+        count=len(matches),
+        truncated=truncated,
+        indexing=workspace.is_indexing,
     )
 
 
@@ -480,7 +670,7 @@ def _python_grep(
 
 
 # ----------------------------------------------------------------------
-# Semantic search / find_related (optional [semantic] extra)
+# Semantic search / find_related (bundled model2vec embeddings)
 # ----------------------------------------------------------------------
 
 

@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -62,6 +63,26 @@ async def _apply_schema(conn: aiosqlite.Connection) -> None:
 
 def _worst_status(*statuses: str) -> str:
     return min(statuses, key=lambda s: _GRAPH_STATUS_PRIORITY.get(s, 0))
+
+
+def _fts_match(query: str) -> str:
+    """
+    Turn a user query into a valid FTS5 MATCH expression.
+
+    FTS5 treats ``.``, ``:``, ``-`` and ``"`` as syntax, so a natural symbol
+    query like ``Match::new`` or ``models.Location`` raises a "syntax error"
+    and the search silently degrades to a LIKE scan. We pass clean queries
+    (word chars, spaces, and the documented ``*`` prefix) through untouched,
+    and otherwise split the query into identifier tokens and AND them as
+    quoted phrases — so ``Match::new`` becomes ``"Match" "new"`` and matches
+    the symbol whose name/qualified_name contains both tokens.
+    """
+    if re.fullmatch(r"[\w\s*]+", query):
+        return query
+    tokens = re.findall(r"\w+", query)
+    if not tokens:
+        return '""'
+    return " ".join(f'"{t}"' for t in tokens)
 
 
 def worst_status(*statuses: str) -> str:
@@ -379,10 +400,11 @@ class SqliteStore:
             ) as cur:
                 old_ids = {r["id"] for r in await cur.fetchall()}
 
-            # Remove old FTS entries
-            for old_id in old_ids:
-                await self._conn.execute(
-                    "DELETE FROM nodes_fts WHERE node_id = ?", (old_id,)
+            # Remove old FTS entries (batched: one round-trip, not one per id)
+            if old_ids:
+                await self._conn.executemany(
+                    "DELETE FROM nodes_fts WHERE node_id = ?",
+                    [(old_id,) for old_id in old_ids],
                 )
 
             # Delete old edges owned by this file's nodes, but PRESERVE
@@ -411,7 +433,12 @@ class SqliteStore:
                 "DELETE FROM deps WHERE importer_path = ?", (file_path,)
             )
 
-            # Insert this file's nodes (foreign targets owned elsewhere)
+            # Insert this file's nodes + FTS (batched). Collect rows first,
+            # then one executemany per table — on a large file this turns
+            # hundreds of awaited round-trips into one, the difference between
+            # an index that finishes in seconds vs one that grinds for an hour.
+            node_rows = []
+            fts_rows = []
             for node in owned:
                 span_json = _encode_span(node.span) if node.span else None
                 meta_json = (
@@ -419,7 +446,20 @@ class SqliteStore:
                     if node.metadata
                     else None
                 )
-                await self._conn.execute(
+                node_rows.append(
+                    (
+                        node.id,
+                        node.kind.value,
+                        node.qualified_name,
+                        node.name,
+                        node.file_path,
+                        span_json,
+                        meta_json,
+                    )
+                )
+                fts_rows.append((node.name, node.qualified_name, node.id))
+            if node_rows:
+                await self._conn.executemany(
                     "INSERT INTO nodes"
                     "(id, kind, qualified_name, name, file_path, "
                     "span_json, metadata_json) "
@@ -431,18 +471,12 @@ class SqliteStore:
                     "  file_path=excluded.file_path,"
                     "  span_json=excluded.span_json,"
                     "  metadata_json=excluded.metadata_json",
-                    (
-                        node.id,
-                        node.kind.value,
-                        node.qualified_name,
-                        node.name,
-                        node.file_path,
-                        span_json,
-                        meta_json,
-                    ),
+                    node_rows,
                 )
 
-            # Insert new edges (from nodes owned by this file)
+            # Insert new edges + import deps (batched).
+            edge_rows = []
+            dep_rows = []
             for rel in graph.relations:
                 if rel.source_id not in owned_ids:
                     continue
@@ -451,28 +485,33 @@ class SqliteStore:
                     if rel.metadata
                     else None
                 )
-                await self._conn.execute(
-                    "INSERT OR IGNORE INTO edges"
-                    "(source_id, target_id, kind, metadata_json) "
-                    "VALUES(?, ?, ?, ?)",
-                    (rel.source_id, rel.target_id, rel.kind.value, meta_json),
+                edge_rows.append(
+                    (rel.source_id, rel.target_id, rel.kind.value, meta_json)
                 )
-                # Track deps from IMPORTS edges
                 if rel.kind == RelationKind.IMPORTS:
                     target = graph.nodes.get(rel.target_id)
                     if target and target.file_path:
-                        await self._conn.execute(
-                            "INSERT OR IGNORE INTO deps"
-                            "(importer_path, imported_path) VALUES(?, ?)",
-                            (file_path, target.file_path),
-                        )
+                        dep_rows.append((file_path, target.file_path))
+            if edge_rows:
+                await self._conn.executemany(
+                    "INSERT OR IGNORE INTO edges"
+                    "(source_id, target_id, kind, metadata_json) "
+                    "VALUES(?, ?, ?, ?)",
+                    edge_rows,
+                )
+            if dep_rows:
+                await self._conn.executemany(
+                    "INSERT OR IGNORE INTO deps"
+                    "(importer_path, imported_path) VALUES(?, ?)",
+                    dep_rows,
+                )
 
-            # Update FTS for this file's nodes
-            for node in owned:
-                await self._conn.execute(
+            # Update FTS for this file's nodes (batched).
+            if fts_rows:
+                await self._conn.executemany(
                     "INSERT INTO nodes_fts"
                     "(name, qualified_name, node_id) VALUES(?, ?, ?)",
-                    (node.name, node.qualified_name, node.id),
+                    fts_rows,
                 )
 
             # Update files table
@@ -504,6 +543,8 @@ class SqliteStore:
         """
         async with self._writing():
             fileless_ids: set[str] = set()
+            node_rows = []
+            fts_rows = []
             for node in graph.nodes.values():
                 if node.file_path is not None:
                     continue
@@ -514,7 +555,19 @@ class SqliteStore:
                     if node.metadata
                     else None
                 )
-                await self._conn.execute(
+                node_rows.append(
+                    (
+                        node.id,
+                        node.kind.value,
+                        node.qualified_name,
+                        node.name,
+                        span_json,
+                        meta_json,
+                    )
+                )
+                fts_rows.append((node.name, node.qualified_name, node.id))
+            if node_rows:
+                await self._conn.executemany(
                     "INSERT INTO nodes"
                     "(id, kind, qualified_name, name, file_path, "
                     "span_json, metadata_json) "
@@ -525,42 +578,40 @@ class SqliteStore:
                     "  name=excluded.name,"
                     "  span_json=excluded.span_json,"
                     "  metadata_json=excluded.metadata_json",
-                    (
-                        node.id,
-                        node.kind.value,
-                        node.qualified_name,
-                        node.name,
-                        span_json,
-                        meta_json,
-                    ),
+                    node_rows,
                 )
                 # Keep structural nodes searchable; dedupe to stay idempotent.
-                await self._conn.execute(
-                    "DELETE FROM nodes_fts WHERE node_id = ?", (node.id,)
+                await self._conn.executemany(
+                    "DELETE FROM nodes_fts WHERE node_id = ?",
+                    [(nid,) for nid in fileless_ids],
                 )
-                await self._conn.execute(
+                await self._conn.executemany(
                     "INSERT INTO nodes_fts"
                     "(name, qualified_name, node_id) VALUES(?, ?, ?)",
-                    (node.name, node.qualified_name, node.id),
+                    fts_rows,
                 )
 
-            inserted = 0
-            for rel in graph.relations:
-                if rel.source_id not in fileless_ids:
-                    continue
-                meta_json = (
+            edge_rows = [
+                (
+                    rel.source_id,
+                    rel.target_id,
+                    rel.kind.value,
                     json.dumps(encode_metadata(rel.metadata))
                     if rel.metadata
-                    else None
+                    else None,
                 )
-                cur = await self._conn.execute(
+                for rel in graph.relations
+                if rel.source_id in fileless_ids
+            ]
+            before = self._conn.total_changes
+            if edge_rows:
+                await self._conn.executemany(
                     "INSERT OR IGNORE INTO edges"
                     "(source_id, target_id, kind, metadata_json) "
                     "VALUES(?, ?, ?, ?)",
-                    (rel.source_id, rel.target_id, rel.kind.value, meta_json),
+                    edge_rows,
                 )
-                inserted += cur.rowcount
-            return inserted
+            return self._conn.total_changes - before
 
     async def apply_cross_language_edges(
         self, relations: list[tuple[str, str, str]]
@@ -718,7 +769,9 @@ class SqliteStore:
                 "WHERE nodes_fts MATCH ? "
                 "LIMIT ?"
             )
-            async with self._read_conn.execute(sql, (query, limit)) as cur:
+            async with self._read_conn.execute(
+                sql, (_fts_match(query), limit)
+            ) as cur:
                 rows = await cur.fetchall()
             return [dict(r) for r in rows]
         except Exception as exc:
@@ -734,6 +787,25 @@ class SqliteStore:
             ) as cur:
                 rows = await cur.fetchall()
             return [dict(r) for r in rows]
+
+    async def find_nodes_by_exact_name(
+        self, name: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """
+        Case-sensitive exact match on ``name`` or ``qualified_name``.
+
+        FTS is case-insensitive and ranks ``responseWriter`` (a struct)
+        alongside the ``ResponseWriter`` interface, so name resolution must
+        prefer an exact-case hit first — otherwise "implementors of
+        ResponseWriter" resolves to the wrong node and returns nothing.
+        """
+        sql = (
+            "SELECT id, kind, qualified_name, name, file_path FROM nodes "
+            "WHERE name = ? OR qualified_name = ? LIMIT ?"
+        )
+        async with self._read_conn.execute(sql, (name, name, limit)) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
 
     async def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Return the full node row for *node_id*, or None if absent."""
@@ -833,6 +905,39 @@ class SqliteStore:
         """
         async with self._read_conn.execute(
             sql, {"start": node_id, "depth": depth}
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def get_implementors(
+        self, node_id: str, max_depth: int = 5
+    ) -> list[dict[str, Any]]:
+        """
+        Return nodes that inherit from / implement node_id, transitively.
+
+        The reverse of "what does X inherit from": these are X's subclasses,
+        interface implementors and embedders — every node whose
+        ``inherits_from`` edge points (directly or via a chain) at node_id.
+        Cycle-protected like the call walks.
+        """
+        sql = """
+        WITH RECURSIVE walk(id, depth, path) AS (
+          SELECT :start, 0, ',' || :start || ','
+          UNION ALL
+          SELECT e.source_id, w.depth + 1, w.path || e.source_id || ','
+          FROM edges e
+          JOIN walk w ON e.target_id = w.id
+          WHERE e.kind = 'inherits_from'
+            AND w.depth < :max_depth
+            AND instr(w.path, ',' || e.source_id || ',') = 0
+        )
+        SELECT DISTINCT n.id, n.kind, n.qualified_name, n.name, n.file_path
+        FROM walk
+        JOIN nodes n ON n.id = walk.id
+        WHERE walk.id != :start
+        """
+        async with self._read_conn.execute(
+            sql, {"start": node_id, "max_depth": max_depth}
         ) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]

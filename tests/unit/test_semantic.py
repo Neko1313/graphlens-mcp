@@ -68,7 +68,9 @@ def test_embedding_text_folds_in_signature_and_docstring():
     assert "m.f" in text
     assert "def f(x: int) -> int" in text
     assert "Adds one." in text
-    assert "more" not in text  # only the summary line is kept
+    # The docstring is now folded in more fully (not just the summary line) so
+    # search-by-meaning has more signal to match against.
+    assert "more" in text
 
 
 def test_is_network_error_and_reason():

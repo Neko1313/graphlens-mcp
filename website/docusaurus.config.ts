@@ -76,6 +76,7 @@ const config: Config = {
             { label: "Introduction", to: "/" },
             { label: "Getting started", to: "/getting-started" },
             { label: "Agent tools", to: "/agent-tools" },
+            { label: "Architecture", to: "/architecture" },
           ],
         },
         {

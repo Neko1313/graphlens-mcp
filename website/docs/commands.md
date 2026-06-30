@@ -14,6 +14,9 @@ sidebar_position: 3
 | `graphlens-mcp reindex` | Force a full rebuild (e.g. after installing a new toolchain) |
 | `graphlens-mcp remove` | Deregister from agents and (with `--purge-db`) delete the local graph |
 
+Add the global `--verbose` / `-v` flag before any command for more detailed output, e.g.
+`graphlens-mcp -v status`.
+
 ## `init`
 
 ```bash
@@ -37,6 +40,19 @@ The agent launches this from its MCP config. The server answers queries from SQL
 default, starts a **filesystem watcher** that keeps the graph fresh as you edit. Pass
 `--no-watch` to disable it (the on-access freshness check still applies). See
 [Freshness](./freshness.md).
+
+## `status`
+
+```bash
+graphlens-mcp status [--root DIR] [--db PATH] [--json]
+```
+
+Reports index freshness and stats for a project — detected languages, toolchain status, and
+graph size/age — so you can tell whether the graph is up to date.
+
+- `--root` — project root (default: current directory).
+- `--db` — graph database path (default: `<root>/.graphlens/graph.db`).
+- `--json` — emit the report as JSON instead of human-readable text.
 
 ## `reindex`
 

@@ -44,7 +44,7 @@ from graphlens_mcp.store.sqlite_store import SqliteStore
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Iterable
+    from collections.abc import AsyncIterator, Iterable
 
 # Built lazily on first use from adapter.file_extensions()
 _EXT_TO_LANG: dict[str, str] | None = None
@@ -136,7 +136,7 @@ class Workspace:
         # re-index of overlapping files cannot interleave read/prune/write.
         self._reindex_lock = asyncio.Lock()
         # Optional semantic layer (search-by-meaning + clusters). Stays inert
-        # unless the [semantic] extra is installed; never blocks graph queries.
+        # until the embedding model is fetched; never blocks graph queries.
         self.semantic = SemanticIndex()
         # Clusters are derived from the whole graph, so an incremental edit
         # marks them stale and they recompute lazily on the next cluster query
@@ -144,12 +144,30 @@ class Workspace:
         # two concurrent cluster queries don't recompute at once.
         self._clusters_dirty = True
         self._cluster_lock = asyncio.Lock()
+        # Re-entrant depth of in-progress (re)indexing. >0 means a full index,
+        # reconcile, or connected-set re-index is running, so query results may
+        # be momentarily incomplete — tools surface this as ``indexing=True``.
+        self._indexing_depth = 0
 
     @classmethod
     async def create(cls, project_root: Path, db_path: Path) -> Workspace:
         """Open store at *db_path*; return a Workspace for *project_root*."""
         store = await SqliteStore.create(db_path)
         return cls(store, project_root)
+
+    @property
+    def is_indexing(self) -> bool:
+        """True while a (re)index runs; query results may be partial."""
+        return self._indexing_depth > 0
+
+    @contextlib.asynccontextmanager
+    async def _indexing(self) -> AsyncIterator[None]:
+        """Mark an indexing operation in progress (re-entrant)."""
+        self._indexing_depth += 1
+        try:
+            yield
+        finally:
+            self._indexing_depth -= 1
 
     def _adapter(self, lang: str) -> LanguageAdapter | None:
         """Return the pooled real adapter for *lang*, creating it once."""
@@ -257,20 +275,21 @@ class Workspace:
         graph's ``meta`` table. A crash that interrupts the expensive tail
         (clustering) can therefore resume via :meth:`resume_pending_index`
         instead of re-running the whole index. The semantic phases are
-        best-effort: if the ``[semantic]`` extra is absent or the embedding
-        model cannot be fetched, the graph index still completes and the
+        best-effort: if the embedding model cannot be fetched (e.g. offline),
+        the graph index still completes and the
         checkpoint simply stops at the graph phase. Returns the graph stats.
         """
-        await self.store.set_meta(_PHASE_KEY, _PHASE_INDEXING)
-        stats = await self._index_graph()
-        # Fingerprint the freshly-indexed file set, then mark the graph phase
-        # complete; the tail phases key their resume off this exact pair.
-        await self.store.set_meta(
-            _HASH_KEY, await self.store.files_fingerprint()
-        )
-        await self.store.set_meta(_PHASE_KEY, _PHASE_GRAPH)
-        await self._run_semantic_tail()
-        return stats
+        async with self._indexing():
+            await self.store.set_meta(_PHASE_KEY, _PHASE_INDEXING)
+            stats = await self._index_graph()
+            # Fingerprint the freshly-indexed file set, then mark the graph
+            # phase complete; the tail phases key their resume off this pair.
+            await self.store.set_meta(
+                _HASH_KEY, await self.store.files_fingerprint()
+            )
+            await self.store.set_meta(_PHASE_KEY, _PHASE_GRAPH)
+            await self._run_semantic_tail()
+            return stats
 
     async def _run_semantic_tail(self) -> None:
         """Embed nodes then cluster, advancing the checkpoint."""
@@ -340,13 +359,16 @@ class Workspace:
             return
         if phase == _PHASE_DONE:
             return
-        if phase == _PHASE_GRAPH:
-            if not (await self.semantic.build(self.store)).ok:
-                return
-            await self.store.set_meta(_PHASE_KEY, _PHASE_SEMANTIC)
-            phase = _PHASE_SEMANTIC
-        if phase == _PHASE_SEMANTIC and await self._recompute_clusters():
-            await self.store.set_meta(_PHASE_KEY, _PHASE_DONE)
+        # The remaining work (embeddings build + clustering) is the expensive
+        # tail; flag it as indexing so tools report partial results meanwhile.
+        async with self._indexing():
+            if phase == _PHASE_GRAPH:
+                if not (await self.semantic.build(self.store)).ok:
+                    return
+                await self.store.set_meta(_PHASE_KEY, _PHASE_SEMANTIC)
+                phase = _PHASE_SEMANTIC
+            if phase == _PHASE_SEMANTIC and await self._recompute_clusters():
+                await self.store.set_meta(_PHASE_KEY, _PHASE_DONE)
 
     async def _index_graph(self) -> dict[str, Any]:
         """Full graph re-index of the project. Returns stats dict."""
@@ -522,7 +544,7 @@ class Workspace:
         Serialized by ``_reindex_lock`` so a watcher re-index and an on-access
         re-index of overlapping files cannot interleave read/prune/write.
         """
-        async with self._reindex_lock:
+        async with self._reindex_lock, self._indexing():
             changed_paths = {await _aresolve(Path(raw)) for raw in changed}
             affected, deleted = await self._connected_set(changed_paths)
 

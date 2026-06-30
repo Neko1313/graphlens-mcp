@@ -9,23 +9,26 @@ sidebar_position: 1
 
 A free, MIT-licensed [MCP](https://modelcontextprotocol.io) server that gives coding agents
 (Claude Code, Cursor, and compatible clients) a **semantic code graph** of your project —
-symbols, cross-file calls, references, imports and cross-language boundaries.
-
-Instead of reading files top-to-bottom or grepping for names, the agent **navigates the
-structure**: *who calls this function*, *what does it depend on*, *what breaks if I change
-its signature*. It is a thin runtime layer over the
-[`graphlens`](https://github.com/Neko1313/graphlens) analysis engine: `graphlens` provides
-the mechanisms (parsing, stable node identity, resolvers); `graphlens-mcp` owns the storage,
-freshness and the agent-facing surface.
+symbols, cross-file calls, references, imports and cross-language boundaries. Instead of
+grepping and reading files one at a time, the agent **navigates the structure**: *who calls
+this function*, *what does it depend on*, *what breaks if I change its signature*.
 
 ## Why
 
-A `filesystem`/grep MCP makes the agent read whole files and match text — slow, noisy, and
-blind to which of three modules actually calls `OrderService.create`. Bare tree-sitter gives
-single-file syntax but cannot resolve links *between* files. `graphlens-mcp` answers the
-cross-file questions — call graphs and impact analysis — and keeps the graph fresh as you
-edit through a filesystem watcher, then teaches the agent to use it via a bundled navigation
-skill.
+The motivation is the same as every other code-context tool: **stop the agent from grepping.**
+The *approach* is what sets `graphlens` apart. Most tools build their **own** ad-hoc model of
+your code — every tool maps the codebase a little differently and nothing is authoritative.
+`graphlens` instead builds on the **language's own real analysis engines** (`rust-analyzer`,
+`gopls`, the TypeScript compiler, the bundled `ty` type engine) — the LSP-grade tooling the
+industry already trusts — for a *stable, real* picture of the project, not a bespoke
+approximation.
+
+That stable foundation is the [`graphlens`](https://github.com/Neko1313/graphlens) engine
+(parsing, stable node identity, resolvers). **`graphlens-mcp` is a smart, agent-facing layer
+over it**: it persists the graph (so the whole thing isn't held in memory), adds a semantic +
+clustering layer, keeps it fresh as you edit through a filesystem watcher, and exposes it to
+agents as navigation tools plus a bundled skill. From that example it is growing into a
+self-sufficient system — see [Architecture](./architecture.md) for how the layer is built.
 
 ## Supported languages
 

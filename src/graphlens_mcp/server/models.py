@@ -42,6 +42,7 @@ class GraphResult(BaseModel):
     count: int = 0
     resolver_status: str = "ok"  # ok | degraded | skeleton
     truncated: bool = False
+    indexing: bool = False
     error: str | None = None
 
 
@@ -53,6 +54,33 @@ class NodeInfoResult(BaseModel):
     signature: str | None = None
     docstring: str | None = None
     resolver_status: str = "ok"
+    indexing: bool = False
+    error: str | None = None
+
+
+class ExploreResult(BaseModel):
+    """
+    One-shot context for a symbol: its definition plus immediate relations.
+
+    Resolves a query to the best-matching node and returns, in a single call,
+    its source/signature and the nodes directly around it — callers, callees,
+    implementors (subtypes), and references — so the agent can answer
+    "what is X / who uses it / what implements it" without chaining several
+    tools. ``candidates`` lists other symbols that matched the query.
+    """
+
+    node: NodeRef | None = None
+    source: str | None = None
+    signature: str | None = None
+    docstring: str | None = None
+    callers: list[NodeRef] = Field(default_factory=list)
+    callees: list[NodeRef] = Field(default_factory=list)
+    implementors: list[NodeRef] = Field(default_factory=list)
+    references: list[NodeRef] = Field(default_factory=list)
+    candidates: list[NodeRef] = Field(default_factory=list)
+    resolver_status: str = "ok"
+    truncated: bool = False
+    indexing: bool = False
     error: str | None = None
 
 
@@ -63,6 +91,7 @@ class FileStructureResult(BaseModel):
     nodes: list[NodeRef] = Field(default_factory=list)
     resolver_status: str = "ok"
     truncated: bool = False
+    indexing: bool = False
     error: str | None = None
 
 
@@ -76,7 +105,7 @@ def to_refs(
 
 
 # ----------------------------------------------------------------------
-# Semantic search / clusters (optional [semantic] extra)
+# Semantic search / clusters (bundled model2vec embeddings)
 # ----------------------------------------------------------------------
 
 
@@ -94,6 +123,7 @@ class CodeSearchResult(BaseModel):
     matches: list[CodeMatch] = Field(default_factory=list)
     count: int = 0
     truncated: bool = False
+    indexing: bool = False
     error: str | None = None
 
 
@@ -127,6 +157,7 @@ class SemanticResult(BaseModel):
     available: bool = True
     truncated: bool = False
     reason: str | None = None
+    indexing: bool = False
     error: str | None = None
 
 
@@ -147,6 +178,7 @@ class ClusterList(BaseModel):
     available: bool = True
     truncated: bool = False
     reason: str | None = None
+    indexing: bool = False
     error: str | None = None
 
 
@@ -158,6 +190,7 @@ class ClusterInfo(BaseModel):
     available: bool = True
     truncated: bool = False
     reason: str | None = None
+    indexing: bool = False
     error: str | None = None
 
 

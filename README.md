@@ -24,11 +24,47 @@ freshness and the agent-facing surface.
 
 ## Why
 
-A `filesystem`/grep MCP makes the agent read whole files and match text — slow, noisy, and
-blind to which of three modules actually calls `OrderService.create`. Bare tree-sitter
-gives single-file syntax but cannot resolve links *between* files. `graphlens-mcp` answers
-the cross-file questions — call graphs and impact analysis — and keeps the graph fresh as
-you edit, then teaches the agent to use it via a bundled navigation skill.
+Coding agents discover structure the slow way — grep, glob, read one file at a time —
+rebuilding call paths by hand before the real work even starts. The motivation is the same
+as every other code-context tool: **stop the agent from grepping.** The *approach* is what
+sets `graphlens` apart.
+
+Most tools answer this by building their **own** model of your code — an ad-hoc graph
+stitched from heuristics, where every tool maps the codebase a little differently and
+nothing is authoritative. `graphlens` takes the opposite bet: it builds on the **language's
+own real analysis engines** — `rust-analyzer`, `gopls`, the TypeScript compiler, the bundled
+`ty` type engine — the LSP-grade tooling the industry already trusts. That yields a *stable,
+real* picture of the project (who actually calls what, across files and languages), not a
+bespoke approximation. And a stable foundation is something you can build on: attach context
+to the parts of a change that matter, auto-extract semantic clusters, answer impact
+questions reliably.
+
+That foundation is the [`graphlens`](https://github.com/Neko1313/graphlens) engine —
+parsing, stable node identity, and the resolvers. **`graphlens-mcp` is a smart, agent-facing
+layer over it**, and — honestly — a worked example of how to *use* the engine: it persists
+the graph (so the whole thing isn't held in memory), adds a semantic + clustering layer on
+top, keeps it fresh as you edit, and exposes it to agents as navigation tools plus a bundled
+skill. From that example it is growing into a **self-sufficient system** — one that, measured
+against the market's giants, aims for **stable, reproducible** results: better in some places,
+worse in others, but honest about which (see [How it compares](#how-it-compares)).
+
+## How it compares
+
+`graphlens-mcp` ships with a reproducible **A/B benchmark** ([`benchmarks/`](benchmarks/README.md))
+that drives the same agent against four interchangeable code-context MCP servers —
+`graphlens`, `semble` (semantic search), `codegraph` (graph index), and a `filesystem`
+(grep + read) baseline — plus a **no-tools control** that measures how much each server adds
+over the model's own memory. It runs across real **Go / Rust / Python / TypeScript** codebases
+and grades answers **deterministically against oracle gold** (no LLM judge),
+stratified into SIMPLE lookups vs HARD impact / cross-file questions, and reports accuracy
+**alongside** token / tool-call / dollar cost — because a cheaper arm at equal accuracy wins.
+
+<!-- BENCHMARK-RESULTS:START -->
+> 📊 **Results: _coming soon._** A headline table (accuracy + tokens + cost per language,
+> vs the `filesystem` baseline and the `none` control) lands here once the current run
+> completes. Until then, see [`benchmarks/README.md`](benchmarks/README.md) for the full
+> methodology and to reproduce it yourself.
+<!-- BENCHMARK-RESULTS:END -->
 
 ## Install
 
@@ -89,10 +125,12 @@ resolved) with an install hint — it never blocks `init`.
 ## Agent tools
 
 Each response carries a graph-quality status (`ok` | `degraded`) so the agent never mistakes
-a partial answer for a complete one.
+a partial answer for a complete one, plus an `indexing` flag (`true` when a background reindex
+is running, so edges may be temporarily incomplete).
 
 | Tool | Purpose |
 |---|---|
+| `explore` | One call: a symbol's source + signature plus its direct callers, callees, implementors and references — **the first call for "what is X / who uses it / what implements it"** |
 | `search_symbols` | Full-text search over symbol names — **start here** |
 | `get_node_info` | Source snippet + signature + location for a node |
 | `get_file_structure` | Symbol outline of a file |
@@ -100,31 +138,22 @@ a partial answer for a complete one.
 | `get_callers` | Who calls a function — primary impact-analysis tool |
 | `get_neighbors` | Nodes within N hops in any direction |
 | `find_references` | Non-call usages (type annotations, assignments) |
+| `get_implementors` | Subclasses / interface implementors / embedders of a symbol (reverse `inherits_from` walk) — "what implements / extends / subclasses X?" |
 | `get_cross_language_calls` | Connections across service boundaries (HTTP/gRPC/queues) |
 | `search_code` | Regex/text over file **content** — the grep replacement (string literals, logs, comments, config) |
-| `search_semantic` ¹ | Search by **meaning**; each hit carries the graph node ids it overlaps |
-| `find_related` ¹ | Find code semantically similar to a symbol |
-| `list_clusters` ¹ | Labeled semantic zones of the codebase (auth, serialization, …) |
-| `get_cluster` ¹ | The cluster a symbol belongs to and its sibling members |
+| `search_semantic` | Search by **meaning**; each hit carries the graph node ids it overlaps |
+| `find_related` | Find code semantically similar to a symbol |
+| `list_clusters` | Labeled semantic zones of the codebase (auth, serialization, …) |
+| `get_cluster` | The cluster a symbol belongs to and its sibling members |
 
-¹ Requires the optional `[semantic]` extra (see below). When it is not installed — or the
-embedding model can't be fetched — these tools return `available=false` with a reason
-instead of failing, so the agent falls back to `search_symbols` / `search_code`.
+The relation tools (`get_callers`, `get_callees`, `get_neighbors`, `find_references`,
+`get_implementors`, `get_node_info`, `get_cross_language_calls`) accept either a symbol
+**name** or a node id directly — you don't need to look up a node id first.
 
-### Semantic search & clusters (optional)
-
-The goal is for an agent to navigate entirely through these tools instead of `grep`.
-`search_code` (the grep replacement) needs no extra; search-by-meaning and clustering add
-[semble](https://github.com/MinishLab/semble) (static embeddings + BM25) and scikit-learn:
-
-```bash
-uv tool install "graphlens-mcp[semantic]"   # or: pipx install "graphlens-mcp[semantic]"
-```
-
-The embedding model (`potion-code-16M`) is fetched once at first use and cached; it runs on
-CPU, no API key required. semble's index is persisted in `.graphlens/semble-index`; clusters
-recompute lazily after edits and are checkpointed so an interrupted build resumes rather than
-restarting. See [docs/design/semantic-search.md](docs/design/semantic-search.md).
+The four semantic tools (`search_semantic`, `find_related`, `list_clusters`,
+`get_cluster`) ship in the box — no extra to install. If the embedding model can't be
+fetched (e.g. a first run with no network), they return `available=false` with a reason
+and the agent falls back to `search_symbols` / `search_code` rather than failing.
 
 ## Freshness model
 
@@ -169,8 +198,9 @@ task check             # ruff + format-check + ty + bandit + pytest (the CI gate
 task docs:serve        # preview the docs site locally (needs Node + pnpm)
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and invariants, or the
-[documentation site](https://neko1313.github.io/graphlens-mcp/) for the full guide.
+See the [Architecture](https://neko1313.github.io/graphlens-mcp/architecture) and
+[Semantic search](https://neko1313.github.io/graphlens-mcp/design/semantic-search) pages on the
+[documentation site](https://neko1313.github.io/graphlens-mcp/) for the design and invariants.
 
 ## License
 

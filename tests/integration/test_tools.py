@@ -80,12 +80,14 @@ async def test_create_mcp_registers_all_tools_with_output_schemas(
         names = {t.name for t in tools}
         assert names == {
             "search_symbols",
+            "explore",
             "get_node_info",
             "get_file_structure",
             "get_callees",
             "get_callers",
             "get_neighbors",
             "find_references",
+            "get_implementors",
             "get_cross_language_calls",
             # Semantic layer ([semantic] extra): registered unconditionally so
             # the schema is always advertised; they report available=false at
