@@ -9,52 +9,45 @@ sidebar_position: 5
 The bundled **navigation skill** teaches the agent to answer structural questions with graph
 tools instead of reading files or grepping. The core strategy:
 
-1. **Start with `explore`** — `explore("X")` is the recommended one-call entry point. It takes a
-   bare symbol name and returns the symbol's source + signature plus its direct callers,
-   callees, implementors and references in a single call — no prior `search_symbols` needed.
-2. **Locate the symbol (optional)** — relation tools resolve a bare symbol name internally, so
-   you can call them directly. When a name is ambiguous, narrow first by distinctive name via
-   `search_symbols`, or deterministically via `get_file_structure(path)` when you know the file.
-   Both also give you a node ID.
-3. **Narrow with graph traversal** — pass a symbol **name** (or a node ID) to `get_callers` /
-   `get_callees` / `find_references` / `get_implementors` rather than reading source files to
-   understand relationships.
-4. **Read source only for implementation detail** — `get_node_info` returns the source
-   snippet for a node; read whole files only when you genuinely need surrounding context.
-
-The relation tools — `get_callers`, `get_callees`, `find_references`, `get_implementors`,
-`get_node_info`, `get_neighbors` — accept either a node ID **or** a bare symbol name (resolved
-internally), so the locate-first step is optional.
+1. **Know the name? Skip straight to `relations`/`info`.** Both accept a bare symbol name or a
+   node ID — resolved internally, no prior `search` call needed.
+2. **Don't know the name?** `search(query)` unifies name, content, and semantic matching over
+   the same node graph, and each hit is a node you can pass straight into `relations`/`info`.
+3. **Narrow with graph traversal, not source reading.** `relations("X")` returns callers,
+   callees, implementors, and references in one call — use it instead of reading files to infer
+   relationships.
+4. **Read source only for implementation detail.** `info(target)` returns a symbol's source or a
+   file's outline/content; read whole files only when you genuinely need surrounding context
+   `info` didn't already give you (`mode="source"` returns the full line-numbered body).
 
 ## Question → tool
 
 | Question | Tool |
 |---|---|
-| What is `X` and who uses it / implements it? | `explore("X")` (one call) |
-| Where is `create_order` defined? | `search_symbols("create_order")` (distinctive name) |
-| Where is `Location` defined? (common noun) | `get_file_structure(path)` or `search_symbols("models.Location")` |
-| What does `create_order` call? | `get_callees(id, max_depth=2)` |
-| Who calls `create_order`? | `get_callers(id, max_depth=3)` |
-| What references `OrderService`? | `find_references(id)` |
-| What subclasses / implements `X`? | `get_implementors("X")` |
-| What symbols are in `order_service.py`? | `get_file_structure("order_service.py")` |
-| Show source + signature of a symbol | `get_node_info(id)` |
-| How does this Python service talk to the TS client? | `get_cross_language_calls(id)` |
-| What's around this class in the graph? | `get_neighbors(id, depth=2)` |
-| Find text in bodies/strings/config (the grep case) | `search_code("regex")` |
-| Find code by meaning when you don't know the name | `search_semantic("retry with backoff")` |
-| Code similar to this symbol? | `find_related(id)` |
-| What are the major zones of this codebase? | `list_clusters()` |
-| What's inside a specific zone? | `get_cluster(id)` |
+| What is `X`, who uses it, what implements it? | `relations("X")` |
+| Where is `create_order` defined? | `search("create_order")` (distinctive name) |
+| Where is `Location` defined? (common noun) | `info(path)` or `search("models.Location")` |
+| What does `create_order` call? | `relations("create_order")` → `callees` |
+| Who calls `create_order`? | `relations("create_order")` → `callers` |
+| What references `OrderService`? | `relations("OrderService")` → `references` |
+| What subclasses / implements `X`? | `relations("X")` → `implementors` |
+| What symbols are in `order_service.py`? | `info("order_service.py")` (outline) |
+| Show source + signature of a symbol | `info(id)` |
+| Read a file's actual content (to edit it) | `info(path, mode="source")` |
+| List every file that calls/imports `X` | `search("X", exhaustive=True)` |
+| Find text in bodies/strings/config (the grep case) | `search("literal text")` |
+| Find code by meaning when you don't know the name | `search("retry with backoff")` |
 
 ## Do not
 
-- Read entire source files to find callers — use `get_callers`.
+- Read entire source files to find callers — use `relations`.
 - Search a bare common noun and trust the result — it gets drowned by file/import nodes; use
-  a distinctive/qualified name, `get_file_structure`, or `search_semantic` as a fallback.
-- Shell out to `grep` — `search_code` is the content-search replacement and keeps you on the
-  graph (each hit maps back to nodes).
-- Assume an edge list is complete when `resolver_status != ok`.
+  a distinctive/qualified name, or `info(path)` when you know the file.
+- Shell out to `grep`/`rg`/`find` — `search` is the content-search replacement and keeps you on
+  the graph (each hit maps back to nodes).
+- Assume a list is complete when `resolver_status != "ok"`.
 - Conclude a symbol is unused when the response has `indexing: true` — that flag means a
   background reindex is still running, so edges may be incomplete. Re-check once indexing
   settles.
+- Repeat the exact same `search`/`relations`/`info` call expecting a different result — the
+  third identical call is blocked outright; change the query, tool, or answer with what you have.

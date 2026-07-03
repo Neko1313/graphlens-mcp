@@ -1,0 +1,7 @@
+# Type-check config mirroring the graphlens-mcp project ty.toml. Source of record
+# for type checking is the `bench` package plus the orchestrator entrypoint.
+[environment]
+root = ["."]
+
+[src]
+include = ["bench", "main.py"]

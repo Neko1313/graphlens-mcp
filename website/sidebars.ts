@@ -16,7 +16,7 @@ const sidebars: SidebarsConfig = {
     {
       type: "category",
       label: "Reference",
-      items: ["agent-tools", "architecture"],
+      items: ["agent-tools", "architecture", "benchmarks"],
     },
     {
       type: "category",

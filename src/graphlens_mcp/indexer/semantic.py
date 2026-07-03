@@ -1,17 +1,17 @@
 """
-Semantic retrieval and clustering over the code graph.
+Semantic retrieval over the code graph.
 
 Embeds graph *nodes* (function/method/class) directly with the model2vec
-static model and stores the float32 vectors in SQLite.  Semantic search and
-find_related do in-process cosine-similarity over a cached vector matrix —
-no file chunking, no external retrieval service, no chunk→node bridge.
-Each search hit is already a graph node, so the result pivots straight into
+static model and stores the float32 vectors in SQLite.  Semantic search does
+in-process cosine-similarity over a cached vector matrix — no file chunking,
+no external retrieval service, no chunk→node bridge. Each search hit is
+already a graph node, so the result pivots straight into
 get_callers/get_callees without extra indirection.
 
-model2vec, numpy, and scikit-learn are required dependencies.  The only
-graceful-degradation path that remains is a model-download failure (network
-outage, HF egress blocked), which is stored as a sticky reason and reported
-via ``available=False`` so the caller can surface it without crashing.
+model2vec and numpy are required dependencies.  The only graceful-degradation
+path that remains is a model-download failure (network outage, HF egress
+blocked), which is stored as a sticky reason and reported via
+``available=False`` so the caller can surface it without crashing.
 """
 
 from __future__ import annotations
@@ -20,28 +20,18 @@ import asyncio
 import json
 import logging
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import model2vec
 import numpy as np
-from sklearn.cluster import HDBSCAN
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     from graphlens_mcp.store.sqlite_store import SqliteStore
 
 logger = logging.getLogger(__name__)
 
 MODEL_ID = "minishlab/potion-code-16M"
-
-_MIN_CLUSTER_SIZE = 3
-_MAX_LABEL_TERMS = 4
-# Above this node count, clustering is skipped — keeps a one-shot full index
-# from stalling on a huge repo.
-_MAX_CLUSTER_NODES = 50_000
 
 _SIGNATURE_KEYS = ("signature", "sig")
 _DOCSTRING_KEYS = ("docstring", "doc", "documentation")
@@ -54,39 +44,6 @@ _MAX_EMBED_CHARS = 1500
 _MAX_BODY_LINES = 12
 _MAX_BODY_CHARS = 600
 _MAX_DOC_CHARS = 300
-
-_LABEL_STOPWORDS = frozenset(
-    {
-        "get",
-        "set",
-        "is",
-        "to",
-        "from",
-        "the",
-        "self",
-        "cls",
-        "init",
-        "new",
-        "value",
-        "data",
-        "obj",
-        "object",
-        "fn",
-        "func",
-        "method",
-        "class",
-        "test",
-        "tests",
-        "impl",
-        "base",
-        "main",
-        "run",
-        "handle",
-        "handler",
-        "do",
-        "make",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -116,14 +73,6 @@ class SemanticResponse:
     available: bool
     hits: list[SemanticHit] = field(default_factory=list)
     reason: str | None = None
-
-
-@dataclass(frozen=True)
-class ClusterComputation:
-    """Computed clusters and node→cluster assignments, ready to persist."""
-
-    clusters: list[dict[str, Any]]
-    assignments: list[dict[str, Any]]
 
 
 def _is_network_error(exc: BaseException) -> bool:
@@ -169,12 +118,12 @@ class SemanticIndex:
 
     :meth:`build` embeds all graph nodes with model2vec and persists the
     float32 vectors to SQLite (via :meth:`SqliteStore.store_embeddings`).
-    Search and find_related do in-process cosine-similarity over a cached
-    vector matrix loaded from the store on first use and reloaded after
-    incremental edits via :meth:`mark_dirty`.
+    :meth:`search` and :meth:`rank` do in-process cosine-similarity over a
+    cached vector matrix loaded from the store on first use and reloaded
+    after incremental edits via :meth:`mark_dirty`.
 
-    All blocking work (model load, encode, cluster) runs off the event loop
-    in a thread pool.  When the model is unreachable every method returns a
+    All blocking work (model load, encode) runs off the event loop in a
+    thread pool.  When the model is unreachable every method returns a
     structured reason rather than raising.
     """
 
@@ -217,7 +166,7 @@ class SemanticIndex:
         """
         self._runtime_reason = None
         try:
-            nodes = await store.get_nodes_for_clustering()
+            nodes = await store.get_nodes_for_embedding()
             if not nodes:
                 self._dirty = False
                 return Availability(ok=True)
@@ -340,83 +289,44 @@ class SemanticIndex:
         return SemanticResponse(available=True, hits=hits)
 
     # ------------------------------------------------------------------
-    # Find related (by node id)
+    # Rerank a candidate set by query similarity
     # ------------------------------------------------------------------
 
-    async def find_related(
-        self,
-        store: SqliteStore,
-        node_id: str,
-        top_k: int,
-    ) -> SemanticResponse:
-        """Return the top_k graph nodes most similar to *node_id*."""
-        avail = await self._ensure_vectors(store)
-        if not avail.ok:
-            return SemanticResponse(available=False, reason=avail.reason)
-        if not self._node_ids:
-            return SemanticResponse(available=True, hits=[])
-
-        vectors = self._vectors
-        node_ids = self._node_ids
-        node_meta = self._node_meta
-        try:
-            source_idx = node_ids.index(node_id)
-        except ValueError:
-            return SemanticResponse(
-                available=False,
-                reason=f"Node {node_id!r} has no stored embedding.",
-            )
-        try:
-            hits = await asyncio.to_thread(
-                _find_related_blocking,
-                source_idx,
-                top_k,
-                vectors,
-                node_ids,
-                node_meta,
-            )
-        except Exception as exc:
-            reason = _model_error_reason(exc)
-            logger.warning("find_related failed: %s", reason)
-            return SemanticResponse(available=False, reason=reason)
-        return SemanticResponse(available=True, hits=hits)
-
-    # ------------------------------------------------------------------
-    # Clustering
-    # ------------------------------------------------------------------
-
-    async def compute_clusters(
-        self, store: SqliteStore
-    ) -> ClusterComputation | None:
+    async def rank(
+        self, store: SqliteStore, query: str, node_ids: list[str]
+    ) -> dict[str, float]:
         """
-        Cluster the stored node vectors using HDBSCAN.
+        Return ``{node_id: cosine}`` of each node's vector to *query*.
 
-        Returns None when there are too few nodes, so the caller can skip
-        the cluster phase without treating it as a hard failure.
+        Used to make search selective: order a candidate set by relevance to
+        the query instead of truncating in FTS order. Nodes without a vector
+        (never embedded) are simply absent. Empty on any unavailability so the
+        caller falls back to its own ordering.
         """
         avail = await self._ensure_vectors(store)
-        if not avail.ok:
-            return None
-        if not self._node_ids or len(self._node_ids) < _MIN_CLUSTER_SIZE:
-            return None
-        if len(self._node_ids) > _MAX_CLUSTER_NODES:
-            logger.warning(
-                "Skipping clustering: %d nodes exceeds cap %d",
-                len(self._node_ids),
-                _MAX_CLUSTER_NODES,
-            )
-            return None
-
+        if not avail.ok or self._vectors is None or not self._node_ids:
+            return {}
+        model = self._model
+        if model is None:
+            try:
+                model = await asyncio.to_thread(
+                    lambda: model2vec.StaticModel.from_pretrained(MODEL_ID)
+                )
+                self._model = model
+            except Exception:
+                return {}
+        index = {nid: i for i, nid in enumerate(self._node_ids)}
+        wanted = [(nid, index[nid]) for nid in node_ids if nid in index]
+        if not wanted:
+            return {}
         vectors = self._vectors
-        node_ids = list(self._node_ids)
-        node_meta = list(self._node_meta)
-        try:
-            return await asyncio.to_thread(
-                _cluster_blocking, node_ids, node_meta, vectors
-            )
-        except Exception as exc:
-            logger.warning("Clustering failed (non-fatal): %s", exc)
-            return None
+
+        def _blocking() -> dict[str, float]:
+            qvec = np.asarray(model.encode([query])[0], dtype=np.float32)
+            qvec /= float(np.linalg.norm(qvec)) or 1.0
+            return {nid: float(vectors[i] @ qvec) for nid, i in wanted}
+
+        return await asyncio.to_thread(_blocking)
 
 
 # ------------------------------------------------------------------
@@ -471,61 +381,6 @@ def _search_blocking(
         )
         for i in idxs
     ]
-
-
-def _find_related_blocking(
-    source_idx: int,
-    top_k: int,
-    vectors: Any,
-    node_ids: list[str],
-    node_meta: list[dict[str, Any]],
-) -> list[SemanticHit]:
-    """Find top_k nodes most similar to *vectors[source_idx]* (blocking)."""
-    qvec = vectors[source_idx]
-    scores = vectors @ qvec
-    scores = scores.copy()
-    # -2.0 is strictly below any cosine similarity (-1.0 floor for unit
-    # vectors), guaranteeing the source is the unique minimum even when
-    # another node happens to score exactly -1.0 (antipodal embedding).
-    scores[source_idx] = -2.0
-    n = min(top_k, len(scores) - 1)
-    if n <= 0:
-        return []
-    idxs = np.argpartition(scores, -n)[-n:]
-    idxs = idxs[np.argsort(scores[idxs])[::-1]]
-    return [
-        SemanticHit(
-            node_id=node_ids[i],
-            kind=node_meta[i]["kind"],
-            name=node_meta[i]["name"],
-            qualified_name=node_meta[i]["qualified_name"],
-            file_path=node_meta[i]["file_path"],
-            score=float(scores[i]),
-        )
-        for i in idxs
-    ]
-
-
-def _cluster_blocking(
-    node_ids: list[str],
-    node_meta: list[dict[str, Any]],
-    vectors: Any,
-) -> ClusterComputation:
-    """HDBSCAN-cluster *vectors*, assemble labeled cluster rows (blocking)."""
-    labels = HDBSCAN(
-        min_cluster_size=_MIN_CLUSTER_SIZE,
-        metric="euclidean",
-        copy=True,
-    ).fit_predict(vectors)
-
-    nodes = [
-        {
-            "id": node_ids[i],
-            "qualified_name": node_meta[i]["qualified_name"],
-        }
-        for i in range(len(node_ids))
-    ]
-    return _assemble_clusters(nodes, vectors, labels)
 
 
 # ------------------------------------------------------------------
@@ -634,75 +489,3 @@ def _split_identifier(name: str) -> list[str]:
         ):
             tokens.append(tok.lower())
     return tokens
-
-
-def _label_for(names: Iterable[str]) -> tuple[str, list[str]]:
-    """
-    Derive a short cluster label and top terms from member names.
-
-    Tokenises each member's name into identifier sub-tokens, drops generic
-    stopwords, and ranks by frequency.  Returns ``(label, terms)`` where the
-    label joins the top terms (falling back to ``"misc"`` if nothing
-    distinctive survives).
-    """
-    counter: Counter[str] = Counter()
-    for name in names:
-        for tok in _split_identifier(name):
-            if len(tok) > 1 and tok not in _LABEL_STOPWORDS:
-                counter[tok] += 1
-    terms = [t for t, _ in counter.most_common(_MAX_LABEL_TERMS)]
-    label = ", ".join(terms) if terms else "misc"
-    return label, terms
-
-
-def _assemble_clusters(
-    nodes: list[dict[str, Any]],
-    unit_vectors: Any,
-    labels: Any,
-) -> ClusterComputation:
-    """
-    Build cluster rows + assignments from HDBSCAN labels and unit vectors.
-
-    Noise points (label ``-1``) are left unclustered.  Each member's score
-    is the cosine similarity to its cluster centroid (vectors are unit-norm,
-    so that is just the dot product), giving a tightness signal that orders
-    members and lets callers gauge how representative a member is.
-    """
-    by_label: dict[int, list[int]] = {}
-    for idx, raw in enumerate(labels):
-        label = int(raw)
-        if label < 0:
-            continue
-        by_label.setdefault(label, []).append(idx)
-
-    clusters: list[dict[str, Any]] = []
-    assignments: list[dict[str, Any]] = []
-    ordered: list[list[int]] = list(by_label.values())
-    ordered.sort(key=len, reverse=True)
-    for new_id, members in enumerate(ordered, start=1):
-        names = [
-            nodes[i].get("qualified_name") or nodes[i].get("name") or ""
-            for i in members
-        ]
-        label, terms = _label_for(names)
-        centroid = unit_vectors[members].mean(axis=0)
-        cnorm = float(np.linalg.norm(centroid)) or 1.0
-        centroid = centroid / cnorm
-        clusters.append(
-            {
-                "id": new_id,
-                "label": label,
-                "size": len(members),
-                "terms": terms,
-            }
-        )
-        for i in members:
-            score = float(np.dot(unit_vectors[i], centroid))
-            assignments.append(
-                {
-                    "node_id": nodes[i]["id"],
-                    "cluster_id": new_id,
-                    "score": score,
-                }
-            )
-    return ClusterComputation(clusters=clusters, assignments=assignments)

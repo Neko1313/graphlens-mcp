@@ -6,75 +6,69 @@ sidebar_position: 4
 
 # Agent tools
 
-Each response carries a graph-quality status (`ok` | `degraded` | `skeleton`, aggregated across
-every returned node's file) so the agent never mistakes a partial answer for a complete one.
-List responses also carry a `truncated` flag and are capped at `MAX_RESULTS` (200).
+graphlens exposes exactly **three** MCP tools. Everything returned is a graph node — from a
+real parse, not a text match — so an agent can trust a result instead of re-verifying it with
+grep.
 
-Every response also carries an `indexing` boolean. The server starts serving immediately and
-reconciles the graph in the background, so `indexing=true` means a reindex is running and edges
-may still be incomplete — don't conclude a symbol is unused while `indexing=true`.
+Every response carries `resolver_status` (`ok` | `degraded`, aggregated across every returned
+node's file) and an `indexing` boolean. The server starts serving immediately and reconciles the
+graph in the background, so `indexing=true` means a reindex is running and edges may still be
+incomplete — don't conclude a symbol is unused while `indexing=true`. List-shaped results also
+carry a `truncated` flag, and relation lists include a matching `*_total` field so a hidden tail
+shows up as a number instead of a silent drop.
 
 | Tool | Purpose |
 |---|---|
-| `search_symbols` | Full-text search over symbol names — **start here** to find a node ID |
-| `explore` | One call for *"what is X / who uses it / what implements it"* — a symbol's source + signature plus its direct callers, callees, implementors and references. **The recommended entry point.** |
-| `get_node_info` | Source snippet + signature + docstring + location for a node |
-| `get_file_structure` | Symbol outline of a file |
-| `get_callees` | What a function calls (outgoing, up to `max_depth`) |
-| `get_callers` | Who calls a function — primary impact-analysis tool |
-| `get_neighbors` | Nodes within N hops in any direction |
-| `find_references` | Non-call usages (type annotations, assignments) |
-| `get_implementors` | Subclasses / interface implementors / embedders — the tool for *"what implements/extends/subclasses X?"* (reverse `inherits_from` walk) |
-| `get_cross_language_calls` | Connections across service boundaries (HTTP/gRPC/queues) |
-| `search_code` | Regex/text over file **content** — the grep replacement (string literals, logs, comments, config) |
-| `search_semantic` | Search by **meaning**; each hit is a graph node, so it pivots into `get_callers`/`get_callees` |
-| `find_related` | Code semantically similar to a given symbol |
-| `list_clusters` | Labeled semantic zones of the codebase (auth, serialization, …) |
-| `get_cluster` | The cluster a symbol belongs to and its sibling members |
+| `search(query, limit=25, path_glob=None, exhaustive=False)` | Find code by NAME, CONTENT, or MEANING in one call — the entry point. Content is matched literally (not regex). Test files are excluded by default. `exhaustive=true` lists every matching file path for "list EVERY file that calls X" tasks. |
+| `relations(symbol, depth=2, limit=25, file=None)` | A symbol's callers, callees, implementors, and non-call references in one call — the impact-analysis tool and the answer to "what implements/extends X?" |
+| `info(target, limit=200, file=None, mode="outline", offset=1)` | Read a symbol's source/signature, or a file's outline (default) or actual line-numbered content (`mode="source"`, Read-equivalent, with `offset`/`limit` windowing and a `dependents` list). |
 
-The relation tools (`explore`, `get_node_info`, `get_callees`, `get_callers`, `get_neighbors`,
-`find_references`, `get_implementors`, `get_cross_language_calls`) accept a node ID **or** a bare
-symbol name — the name is resolved internally, so no prior `search_symbols` call is required.
-Wherever a `path_glob` is accepted, a bare directory expands to `dir/**`, and `max_depth` / `depth`
-/ `limit` are clamped (not rejected) when they exceed their caps.
-
-The last four embed graph nodes with a bundled `model2vec` model (no extra to install). If
-the embedding model can't be fetched (offline first run), they return `available=false` with a
-reason and the agent falls back to `search_symbols` / `search_code`.
+`relations` and `info` both accept a node ID **or** a bare symbol name — the name is resolved
+internally, so no prior `search` call is required. If a name matches several definitions, pass
+`file` (a path or suffix) to pin the one you mean.
 
 ## Searching effectively
 
-`search_symbols` is FTS/BM25 over symbol names **and** qualified names — short, common tokens
-rank badly because dozens of files, migrations and imports share them.
+`search` unifies three matching strategies — exact/near name match, literal content match, and
+semantic (meaning) fallback — over the same node graph:
 
-- **Don't search a bare common noun** (`Location`, `User`, `Config`). The defining
-  class/function may stay buried under file and import nodes even at a high `limit`.
+- **Don't search a bare common noun** (`Location`, `User`, `Config`) expecting the defining
+  class to rank first among files, imports, and short names sharing the token.
 - **Use the most distinctive identifier** you have: a compound name (`LocationRepository`) or
-  qualify with the module path (`models.Location`). The extra tokens discriminate.
-- **Know the file? Skip search.** `get_file_structure(path)` deterministically lists every
-  node with its ID — filter by `kind` (`class`/`function`/`method`).
+  qualify with the module path (`models.Location`).
+- **Know the file? Skip search.** `info(path)` deterministically lists every node's outline.
+- Content queries are **literal, not regex** — write `Request(` or `getErrorMap(` as-is.
+- Scope with `path_glob` (e.g. `"tests/*"`, `"*.ts"`, `"!tests/*"`) instead of guessing a
+  `file:`/`content:` query syntax that doesn't exist.
+
+The semantic fallback embeds graph nodes with a bundled `model2vec` model (no extra install). If
+the embedding model can't be fetched (offline first run), semantic matching is skipped and
+`search` falls back to name/content matching only.
 
 ## Impact-analysis workflow
 
 When asked *"what breaks if I change X?"*:
 
-1. `get_callers("X", max_depth=5)` → direct and transitive callers. Relation tools accept a
-   symbol **name** directly, so the `search_symbols("X")` lookup is optional — pass the name and
-   it's resolved internally. (`explore("X")` returns callers, callees, implementors and
-   references in a single call if you want the whole picture at once.)
-2. `find_references("X")` → non-call usages (type annotations, assignments).
-3. `get_implementors("X")` → subclasses / implementors that override behaviour.
-4. `get_cross_language_calls("X")` → cross-service consumers.
-5. Summarise the affected symbols — use `get_node_info` only for the ones that need
-   elaboration, instead of reading every caller file.
+1. `relations("X", depth=3)` → callers, callees, implementors, and references in one call. Pass
+   the name directly — a prior `search("X")` lookup is optional.
+2. If a list's `*_total` exceeds what's shown, narrow with `search` and distinguishing terms
+   rather than re-calling `relations` with a bigger `limit` — the cap reflects the graph's real
+   size, not a page boundary.
+3. Summarise the affected symbols — use `info` only for the ones that need elaboration, instead
+   of reading every caller file.
 
-## Respect `resolver_status`
+## Respect `resolver_status` and `indexing`
 
-- `ok` — full semantic graph, edges are trustworthy.
-- `degraded` — calls/types not fully resolved (usually a missing language toolchain); treat
-  edges as approximate and suggest `graphlens-mcp reindex` or installing the toolchain.
-- `skeleton` — structure only; relationship edges aren't available yet for these nodes.
+- `resolver_status: "ok"` — full semantic graph, edges are trustworthy.
+- `resolver_status: "degraded"` — calls/types not fully resolved (usually a missing language
+  toolchain); treat edges as approximate and suggest `graphlens-mcp reindex` or installing the
+  toolchain.
+- `indexing: true` — a background reindex is still running, so missing callers/edges may simply
+  not be indexed yet — don't conclude a symbol is unused until indexing has settled.
 
-Pair this with the `indexing` flag on every response: when `indexing=true` a background reindex
-is still running, so missing callers/edges may simply not be indexed yet — don't conclude a
-symbol is unused until indexing has settled.
+## Repeat guard
+
+Calling `search`, `relations`, or `info` with identical arguments twice returns a `repeat_hint` —
+the result is deterministic and won't change. A third identical call is blocked outright
+(`error` field set, no data) to force a different query, tool, or a final answer instead of
+looping.

@@ -1,8 +1,6 @@
-"""Unit tests for the store's semantic bridge, clusters, fingerprint, meta."""
+"""Unit tests for the store's semantic bridge, fingerprint, meta."""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 from graphlens import Node, NodeKind, make_node_id
@@ -61,69 +59,6 @@ async def test_nodes_overlapping_is_scoped_to_the_file(store):
     here = node_with_span("m.here", 1, 5)
     await _apply(store, [here])
     assert await store.nodes_overlapping("/other.py", 1, 5) == []
-
-
-# ---- cluster storage -----------------------------------------------------
-
-
-async def test_cluster_round_trip(store):
-    a = node_with_span("m.login", 1, 5)
-    b = node_with_span("m.authToken", 6, 10)
-    c = node_with_span("m.charge", 11, 15)
-    await _apply(store, [a, b, c])
-
-    clusters = [
-        {"id": 1, "label": "auth", "size": 2, "terms": ["auth", "login"]},
-        {"id": 2, "label": "pay", "size": 1, "terms": ["pay"]},
-    ]
-    assignments = [
-        {"node_id": a.id, "cluster_id": 1, "score": 0.9},
-        {"node_id": b.id, "cluster_id": 1, "score": 0.8},
-        {"node_id": c.id, "cluster_id": 2, "score": 0.7},
-    ]
-    await store.replace_clusters(clusters, assignments)
-
-    assert await store.cluster_count() == 2
-
-    # min_size filters out the singleton cluster.
-    listed = await store.list_clusters(min_size=2)
-    assert [row["id"] for row in listed] == [1]
-
-    got = await store.get_cluster(1)
-    assert got["label"] == "auth"
-    assert json.loads(got["terms"]) == ["auth", "login"]
-
-    # Members come back ordered by score (descending).
-    members = await store.get_cluster_members(1)
-    assert [m["id"] for m in members] == [a.id, b.id]
-
-    assert await store.get_cluster_id_for_node(a.id) == 1
-    assert await store.get_cluster_id_for_node("missing") is None
-
-
-async def test_replace_clusters_overwrites_previous(store):
-    a = node_with_span("m.one", 1, 5)
-    await _apply(store, [a])
-    await store.replace_clusters(
-        [{"id": 1, "label": "x", "size": 1, "terms": []}],
-        [{"node_id": a.id, "cluster_id": 1, "score": 1.0}],
-    )
-    await store.replace_clusters([], [])
-    assert await store.cluster_count() == 0
-    assert await store.get_cluster_id_for_node(a.id) is None
-
-
-async def test_cluster_members_filter_dangling_assignments(store):
-    a = node_with_span("m.gone", 1, 5)
-    await _apply(store, [a])
-    await store.replace_clusters(
-        [{"id": 1, "label": "x", "size": 1, "terms": []}],
-        [{"node_id": a.id, "cluster_id": 1, "score": 1.0}],
-    )
-    # The node's file is deleted; its cluster assignment is now dangling and
-    # must be filtered out at read time (matching the edge-query model).
-    await store.delete_file(FILE)
-    assert await store.get_cluster_members(1) == []
 
 
 # ---- fingerprint + meta --------------------------------------------------

@@ -28,13 +28,11 @@ _SCHEMA_SQL = Path(__file__).parent / "schema.sql"
 # rather than migrating it (see ARCHITECTURE.md). The stored fingerprint
 # also folds in graphlens' own model SCHEMA_VERSION, so a core model
 # change invalidates the cache too.
-LOCAL_SCHEMA_VERSION = 5
+LOCAL_SCHEMA_VERSION = 6
 
 _ALL_TABLES = (
     "nodes_fts",
     "node_embeddings",
-    "node_clusters",
-    "clusters",
     "edges",
     "nodes",
     "deps",
@@ -798,10 +796,19 @@ class SqliteStore:
         alongside the ``ResponseWriter`` interface, so name resolution must
         prefer an exact-case hit first — otherwise "implementors of
         ResponseWriter" resolves to the wrong node and returns nothing.
+
+        Ordered so a real definition outranks an ``import`` alias: a common
+        name (e.g. ``Dashboard``) can be re-imported under the same name in
+        dozens of files, and with no ordering those aliases fill the LIMIT
+        before the one row that is the actual class/function definition ever
+        appears — the caller then picks an import statement's location
+        instead of where the symbol is defined.
         """
         sql = (
             "SELECT id, kind, qualified_name, name, file_path FROM nodes "
-            "WHERE name = ? OR qualified_name = ? LIMIT ?"
+            "WHERE name = ? OR qualified_name = ? "
+            "ORDER BY CASE WHEN kind = 'import' THEN 1 ELSE 0 END "
+            "LIMIT ?"
         )
         async with self._read_conn.execute(sql, (name, name, limit)) as cur:
             rows = await cur.fetchall()
@@ -818,6 +825,21 @@ class SqliteStore:
             row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def get_node_spans(
+        self, node_ids: list[str]
+    ) -> dict[str, str | None]:
+        """Return ``{id: span_json}`` for the given ids (batch lookup)."""
+        if not node_ids:
+            return {}
+        # placeholders is a count of '?' binds, never user data.
+        placeholders = ",".join("?" * len(node_ids))
+        async with self._read_conn.execute(
+            f"SELECT id, span_json FROM nodes WHERE id IN ({placeholders})",  # noqa: S608
+            node_ids,
+        ) as cur:
+            rows = await cur.fetchall()
+        return {r["id"]: r["span_json"] for r in rows}
+
     async def get_nodes_in_file(self, file_path: str) -> list[dict[str, Any]]:
         """Return node rows defined in *file_path*, ordered by kind/name."""
         async with self._read_conn.execute(
@@ -831,7 +853,15 @@ class SqliteStore:
     async def get_callees(
         self, node_id: str, max_depth: int = 3
     ) -> list[dict[str, Any]]:
-        """Return nodes node_id calls (outgoing CALLS), cycle-protected."""
+        """
+        Return nodes node_id calls (outgoing CALLS), cycle-protected.
+
+        Ordered by proximity (direct calls before transitive ones) — a cheap
+        importance proxy borrowed from aider's repo-map ranking: under a cap,
+        the closest edges are more architecturally relevant than an
+        arbitrary tail, so a hard limit truncates the least-relevant nodes
+        first instead of a random subset.
+        """
         sql = """
         WITH RECURSIVE walk(id, depth, path) AS (
           SELECT :start, 0, ',' || :start || ','
@@ -843,10 +873,13 @@ class SqliteStore:
             AND w.depth < :max_depth
             AND instr(w.path, ',' || e.target_id || ',') = 0
         )
-        SELECT DISTINCT n.id, n.kind, n.qualified_name, n.name, n.file_path
-        FROM walk
-        JOIN nodes n ON n.id = walk.id
-        WHERE walk.id != :start
+        SELECT n.id, n.kind, n.qualified_name, n.name, n.file_path
+        FROM nodes n
+        JOIN (
+          SELECT id, MIN(depth) AS min_depth FROM walk
+          WHERE id != :start GROUP BY id
+        ) w ON w.id = n.id
+        ORDER BY w.min_depth ASC
         """
         async with self._read_conn.execute(
             sql, {"start": node_id, "max_depth": max_depth}
@@ -857,7 +890,12 @@ class SqliteStore:
     async def get_callers(
         self, node_id: str, max_depth: int = 3
     ) -> list[dict[str, Any]]:
-        """Return nodes that call node_id (incoming CALLS), cycle-safe."""
+        """
+        Return nodes that call node_id (incoming CALLS), cycle-safe.
+
+        Ordered by proximity (direct callers before transitive ones) — see
+        `get_callees` for why.
+        """
         sql = """
         WITH RECURSIVE walk(id, depth, path) AS (
           SELECT :start, 0, ',' || :start || ','
@@ -869,10 +907,13 @@ class SqliteStore:
             AND w.depth < :max_depth
             AND instr(w.path, ',' || e.source_id || ',') = 0
         )
-        SELECT DISTINCT n.id, n.kind, n.qualified_name, n.name, n.file_path
-        FROM walk
-        JOIN nodes n ON n.id = walk.id
-        WHERE walk.id != :start
+        SELECT n.id, n.kind, n.qualified_name, n.name, n.file_path
+        FROM nodes n
+        JOIN (
+          SELECT id, MIN(depth) AS min_depth FROM walk
+          WHERE id != :start GROUP BY id
+        ) w ON w.id = n.id
+        ORDER BY w.min_depth ASC
         """
         async with self._read_conn.execute(
             sql, {"start": node_id, "max_depth": max_depth}
@@ -918,7 +959,8 @@ class SqliteStore:
         The reverse of "what does X inherit from": these are X's subclasses,
         interface implementors and embedders — every node whose
         ``inherits_from`` edge points (directly or via a chain) at node_id.
-        Cycle-protected like the call walks.
+        Cycle-protected like the call walks. Ordered by proximity (direct
+        implementors before transitive ones) — see `get_callees` for why.
         """
         sql = """
         WITH RECURSIVE walk(id, depth, path) AS (
@@ -931,10 +973,13 @@ class SqliteStore:
             AND w.depth < :max_depth
             AND instr(w.path, ',' || e.source_id || ',') = 0
         )
-        SELECT DISTINCT n.id, n.kind, n.qualified_name, n.name, n.file_path
-        FROM walk
-        JOIN nodes n ON n.id = walk.id
-        WHERE walk.id != :start
+        SELECT n.id, n.kind, n.qualified_name, n.name, n.file_path
+        FROM nodes n
+        JOIN (
+          SELECT id, MIN(depth) AS min_depth FROM walk
+          WHERE id != :start GROUP BY id
+        ) w ON w.id = n.id
+        ORDER BY w.min_depth ASC
         """
         async with self._read_conn.execute(
             sql, {"start": node_id, "max_depth": max_depth}
@@ -1041,6 +1086,21 @@ class SqliteStore:
             row = await cur.fetchone()
         return row[0] if row else 0
 
+    async def find_files_by_suffix(self, suffix: str) -> list[str]:
+        """
+        Indexed file paths ending in *suffix* at a path boundary.
+
+        Lets a caller resolve a repo-relative guess (e.g. ``httpx/_client.py``)
+        against an index rooted below the repo (e.g. at the package dir),
+        where a raw path join would silently miss.
+        """
+        async with self._read_conn.execute(
+            "SELECT path FROM files WHERE path = ? OR path LIKE ?",
+            (suffix, f"%/{suffix}"),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [r["path"] for r in rows]
+
     async def list_files(self) -> list[dict[str, Any]]:
         """Return path/status/language per indexed file, ordered by path."""
         async with self._read_conn.execute(
@@ -1121,16 +1181,15 @@ class SqliteStore:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-    async def get_nodes_for_clustering(self) -> list[dict[str, Any]]:
+    async def get_nodes_for_embedding(self) -> list[dict[str, Any]]:
         """
-        Return file-owned symbol nodes to embed for clustering.
+        Return file-owned symbol nodes to embed for semantic search.
 
-        Only the symbol kinds worth grouping semantically (functions,
-        methods, classes) with a real file are returned; fileless
-        structural nodes (project/module/boundary) and leaf nodes
-        (parameters/variables) are excluded so clusters describe units of
-        behavior rather than scaffolding. ``metadata_json`` is included so
-        the caller can fold a signature/docstring into the embedding text.
+        Only the symbol kinds worth embedding (functions, methods, classes)
+        with a real file are returned; fileless structural nodes (project/
+        module/boundary) and leaf nodes (parameters/variables) are excluded.
+        ``metadata_json`` is included so the caller can fold a signature/
+        docstring into the embedding text.
         """
         sql = """
         SELECT id, kind, qualified_name, name, file_path, metadata_json
@@ -1184,118 +1243,6 @@ class SqliteStore:
         async with self._read_conn.execute(sql) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
-
-    # ------------------------------------------------------------------
-    # Cluster storage / queries
-    # ------------------------------------------------------------------
-
-    async def replace_clusters(
-        self,
-        clusters: list[dict[str, Any]],
-        assignments: list[dict[str, Any]],
-    ) -> None:
-        """
-        Atomically replace the whole cluster set and node→cluster mapping.
-
-        *clusters* rows carry ``id``/``label``/``size``/``terms`` (terms is
-        a list, stored as JSON); *assignments* rows carry
-        ``node_id``/``cluster_id``/``score``. Wiping and re-inserting under
-        one write keeps the cluster view consistent with a single full
-        recompute (clusters are a regenerable cache, never migrated).
-        """
-        async with self._writing():
-            await self._conn.execute("DELETE FROM node_clusters")
-            await self._conn.execute("DELETE FROM clusters")
-            for c in clusters:
-                await self._conn.execute(
-                    "INSERT INTO clusters(id, label, size, terms) "
-                    "VALUES(?, ?, ?, ?)",
-                    (
-                        c["id"],
-                        c["label"],
-                        c["size"],
-                        json.dumps(c.get("terms", [])),
-                    ),
-                )
-            for a in assignments:
-                await self._conn.execute(
-                    "INSERT OR REPLACE INTO "
-                    "node_clusters(node_id, cluster_id, score) "
-                    "VALUES(?, ?, ?)",
-                    (a["node_id"], a["cluster_id"], a.get("score")),
-                )
-
-    async def clear_clusters(self) -> None:
-        """Drop all cluster rows and assignments (e.g. before a recompute)."""
-        async with self._writing():
-            await self._conn.execute("DELETE FROM node_clusters")
-            await self._conn.execute("DELETE FROM clusters")
-
-    async def cluster_count(self) -> int:
-        """Return the number of stored clusters."""
-        async with self._read_conn.execute(
-            "SELECT COUNT(*) FROM clusters"
-        ) as cur:
-            row = await cur.fetchone()
-        return row[0] if row else 0
-
-    async def list_clusters(
-        self, min_size: int = 1, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """Return clusters with at least *min_size* members, largest first."""
-        sql = """
-        SELECT id, label, size, terms FROM clusters
-        WHERE size >= :min_size
-        ORDER BY size DESC, id ASC
-        LIMIT :limit
-        """
-        async with self._read_conn.execute(
-            sql, {"min_size": min_size, "limit": limit}
-        ) as cur:
-            rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_cluster(self, cluster_id: int) -> dict[str, Any] | None:
-        """Return a single cluster row (id/label/size/terms) or None."""
-        async with self._read_conn.execute(
-            "SELECT id, label, size, terms FROM clusters WHERE id = ?",
-            (cluster_id,),
-        ) as cur:
-            row = await cur.fetchone()
-        return dict(row) if row else None
-
-    async def get_cluster_members(
-        self, cluster_id: int, limit: int = 200
-    ) -> list[dict[str, Any]]:
-        """
-        Return the member nodes of *cluster_id*, tightest-fit first.
-
-        Joins through ``nodes`` so members whose node has since vanished
-        (a dangling assignment after a delete) are filtered out, matching
-        the read-time integrity model used by the edge queries.
-        """
-        sql = """
-        SELECT n.id, n.kind, n.qualified_name, n.name, n.file_path, nc.score
-        FROM node_clusters nc
-        JOIN nodes n ON n.id = nc.node_id
-        WHERE nc.cluster_id = :cid
-        ORDER BY nc.score DESC NULLS LAST, n.qualified_name ASC
-        LIMIT :limit
-        """
-        async with self._read_conn.execute(
-            sql, {"cid": cluster_id, "limit": limit}
-        ) as cur:
-            rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_cluster_id_for_node(self, node_id: str) -> int | None:
-        """Return the cluster id a node belongs to, or None if unclustered."""
-        async with self._read_conn.execute(
-            "SELECT cluster_id FROM node_clusters WHERE node_id = ?",
-            (node_id,),
-        ) as cur:
-            row = await cur.fetchone()
-        return row["cluster_id"] if row else None
 
 
 # ------------------------------------------------------------------

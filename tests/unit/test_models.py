@@ -6,9 +6,9 @@ import pytest
 
 from graphlens_mcp.server.models import (
     MAX_RESULTS,
-    GraphResult,
+    InfoResult,
     NodeRef,
-    to_refs,
+    to_file_nodes,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.tools]
@@ -31,26 +31,26 @@ def test_node_ref_ignores_extra_columns():
     assert not hasattr(ref, "span_json")
 
 
-def test_to_refs_truncates_to_limit_and_flags_it():
+def test_to_file_nodes_truncates_to_limit_and_flags_it():
     rows = [_row(str(i)) for i in range(5)]
-    refs, truncated = to_refs(rows, limit=2)
-    assert len(refs) == 2
+    nodes, truncated = to_file_nodes(rows, limit=2)
+    assert len(nodes) == 2
     assert truncated is True
 
 
-def test_to_refs_does_not_flag_when_within_limit():
+def test_to_file_nodes_does_not_flag_when_within_limit():
     rows = [_row("a"), _row("b")]
-    refs, truncated = to_refs(rows, limit=10)
-    assert len(refs) == 2
+    nodes, truncated = to_file_nodes(rows, limit=10)
+    assert len(nodes) == 2
     assert truncated is False
 
 
-def test_to_refs_caps_at_max_results():
+def test_to_file_nodes_caps_at_max_results():
     rows = [_row(str(i)) for i in range(MAX_RESULTS + 50)]
-    refs, truncated = to_refs(rows, limit=MAX_RESULTS + 50)
-    assert len(refs) == MAX_RESULTS
+    nodes, truncated = to_file_nodes(rows, limit=MAX_RESULTS + 50)
+    assert len(nodes) == MAX_RESULTS
     assert truncated is True
 
 
-def test_graph_result_defaults_to_ok_status():
-    assert GraphResult().resolver_status == "ok"
+def test_info_result_defaults_to_ok_status():
+    assert InfoResult().resolver_status == "ok"

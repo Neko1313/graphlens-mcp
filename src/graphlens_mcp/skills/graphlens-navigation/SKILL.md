@@ -4,168 +4,131 @@ description: >
   Navigate the code graph using graphlens MCP tools instead of reading files or grepping.
   Use when asked: "what calls X", "what breaks if I change X", "who uses this function",
   "what does this function depend on", "impact analysis", "find callers", "find references",
-  "what's in this file", "how do services communicate", "cross-language calls",
-  "search for / find in the code", "where is this string/log/config", "find code that does X",
-  "what is this codebase about", "group related code".
-  Start with search_semantic (concept) or search_symbols (known name) or get_file_structure
-  (known file). Use search_code only for raw text, never grep directly.
+  "what implements/extends X", "what's in this file", "search for / find in the code",
+  "where is this string/log/config", "find code that does X".
+  Three tools: search(query) finds nodes by name, content, or meaning; relations(symbol)
+  gives callers/callees/implementors/references; info(target) reads a symbol's source or
+  a file's outline/content.
 allowed-tools: Bash
 ---
 
 # graphlens Navigation
 
-graphlens MCP tools ARE your grep, ls, and file reader for code navigation.
-**Never shell out to grep, find, or read entire files for structural questions.**
-Every navigation question has a tool answer; raw file reads are for implementation
-details only after you have a node ID.
+graphlens exposes exactly three MCP tools — `search`, `relations`, `info` — that
+replace grep/ls/file-reads for code navigation. Every result is a graph node
+(from a real parse, not text matching), so trust it instead of re-verifying
+with grep.
 
 ## Decision tree: how to start
 
 ```
-Investigating one symbol (what is it / who calls it / what implements it)?
-  → explore("name")   # ONE call: source + callers + callees + implementors + refs
-
-Do you know the exact symbol name?
-  YES → Is it short/common (User, Config, get)?
-          YES → get_file_structure(path) if you know the file, else search_symbols("pkg.ClassName")
-          NO  → pass the name straight to the relation tool you need —
-                get_callers("SymbolName") / get_node_info("SymbolName") etc.
-                accept a NAME, not only a node_id (no search_symbols round-trip)
-  NO  → Can you describe the behavior in words?
-          YES → search_semantic("description of behavior")   # primary discovery tool
-          NO  → list_clusters()  # orient in unfamiliar repo by semantic zones
+Know the exact symbol name or a node id?
+  YES → relations(name) for callers/callees/implementors/refs in one call
+        info(name) for its source + signature
+  NO  → Can you describe it as literal text (a name fragment, a code snippet)?
+          YES → search(query)  # name, content, and meaning are unified here
+          NO  → search(query) still works — it falls back to semantic (meaning) matching
 ```
 
-**Relation tools accept a node id OR a symbol name.** `get_callers`,
-`get_callees`, `get_implementors`, `find_references`, `get_neighbors` and
-`get_node_info` resolve a bare name to the best-matching node internally — so
-prefer `get_callers("create_order")` over chaining `search_symbols` first.
+`relations` and `info` both accept **a node id OR a plain symbol name** — no
+separate lookup call needed. Pass either straight from a `search` result's
+`id`/`qualified_name`, or a name you already know.
 
-## Replacing common tools
+## The three tools
+
+### search(query, limit=25, path_glob=None, exhaustive=False)
+The one way in — unifies NAME, CONTENT, and MEANING matching:
+- Content is matched **literally**, not as regex — write `Request(` or
+  `getErrorMap(` as-is, no escaping.
+- Returns graph nodes **with their signature** (`nodes`), plus non-symbol text
+  hits (`text_matches`) for content with no enclosing symbol (config/comments).
+- Scope with `path_glob` (e.g. `"tests/*"`, `"*.ts"`, `"!tests/*"` to exclude a
+  subtree) — there is no `file:`/`content:` query syntax, use `path_glob`
+  instead of guessing one.
+- **Test files are excluded by default** unless `path_glob` is set explicitly
+  or the query itself mentions "test" — pass `path_glob="tests/*"` to search
+  them on purpose.
+- Set `exhaustive=true` for "list EVERY file that calls/imports X" — returns
+  every matching file path (no signatures), uncapped by the normal top-N limit
+  (which can silently drop matches on a large fan-out).
+- If the response's `note` field is set, your literal text matched nothing —
+  every node came from a name/meaning guess, not a confirmed hit. Simplify the
+  query instead of repeating it verbatim.
+
+### relations(symbol, depth=2, limit=25, file=None)
+A symbol's whole neighbourhood in one call: `callers`, `callees`,
+`implementors`, `references` — each with its signature. THE tool for impact
+analysis ("what breaks if I change X?") and "what implements/extends X".
+- Each list is capped at `limit`; the matching `*_total` field is the true
+  count, so a hidden tail shows as a number, not silently dropped. A bigger
+  `limit` cannot reveal more — it's the graph's real size.
+- Test-file callers/callees are excluded by default (unless `symbol` mentions
+  "test"), so the cap fills with production code.
+- If `symbol` matches several definitions, pass `file` (a path or suffix) to
+  pin the one you mean — e.g. one `UserService` per service in a monorepo.
+
+### info(target, limit=200, file=None, mode="outline", offset=1)
+Read a specific target — a SYMBOL or a FILE:
+- Symbol → source, signature, and location.
+- File, default (`mode="outline"`) → its symbol outline (cheap structural
+  overview, no full content).
+- File, `mode="source"` → the file's actual current content, line-numbered
+  (`<n>\t<line>`, the same shape `Read` gives you — safe to edit from),
+  windowable with `offset`/`limit` just like `Read`, plus which files import
+  it (`dependents`). Use this instead of opening the file yourself whenever
+  you need the body, not just its symbol list.
+- If `target` (a symbol name) matches several definitions, pass `file` (a
+  path or suffix) to disambiguate, same as `relations`.
+
+## Common replacements
 
 | Old habit | graphlens equivalent |
 |---|---|
-| `grep -r "pattern" .` | `search_code("pattern")` |
-| `grep -r "def foo\|class Foo"` | `search_symbols("foo")` |
-| `cat file.py \| grep def` | `get_file_structure("path/to/file.py")` |
-| `ls src/authz/` | `search_symbols("authz.")` — qualified prefix |
-| `grep -r "authentication"` to find auth code | `search_semantic("authentication")` |
-| `grep -r "Interface"` to find implementations | `get_implementors("Interface")` — never guess from grep |
-| Read whole file to find a function | `get_file_structure(file)` → `get_node_info(id)` |
-| Read file to find callers | `get_callers("name")` — no file reads, no prior lookup |
-
-## Searching effectively
-
-### search_symbols — for known names
-FTS5/BM25 over symbol names and qualified names.
-
-- **Short/common names rank poorly** (`User`, `Config`, `get`, `handle`). Dozens of
-  imports and file nodes match — the defining class may not appear in `limit=50`.
-- **Use the most distinctive form**: compound name (`UserRepository`), qualified path
-  (`models.User`, `authz.guard`), or wildcard prefix (`OAuth*`).
-- **Know the file? Skip search.** `get_file_structure("path/to/file.py")` lists every
-  node with its ID deterministically — faster and more reliable for common names.
-
-### search_semantic — primary discovery tool
-Use when you don't know the symbol name. Describe behavior in natural language:
-- `"validate JWT token and extract claims"`
-- `"retry failed HTTP request with exponential backoff"`
-- `"check user has permission for resource"`
-- Concept names also work well: `"authentication"`, `"rate limiting"`, `"caching"`
-
-Each hit IS a graph node — `node_id` goes straight to `get_callers`/`get_node_info`.
-
-### search_code — raw text patterns only
-Use for things the symbol graph cannot answer: string literals, log messages, comments,
-TODOs, config values, SQL fragments, URLs.
-
-**Pattern is PCRE regex** — escape metacharacters for literal searches:
-- Parentheses: `"foo\\(bar\\)"` not `"foo(bar)"`
-- Dots: `"os\\.path"` not `"os.path"`
-- When in doubt, use a distinctive substring without specials: `"needle-in-haystack"`
-
-Scope with `path_glob`: a glob `search_code("def ", path_glob="*.py")` or a
-**bare directory** `search_code("TODO", path_glob="src/auth")` (expanded to
-`src/auth/**`). `search_symbols` takes the same `path_glob` to restrict by subtree.
-
-### get_file_structure — file outline (NOT directory)
-- Takes a **file** path only — a directory path returns empty (`degraded` or empty list).
-- For "what's in this directory": use `search_symbols("prefix.")` with the package prefix.
-- Nodes with `file_path: null` are **external stubs** — the symbol is used here but
-  defined in a dependency. Use `get_file_structure` on the importer or `search_symbols`
-  with the qualified name to navigate to it.
-
-## Tool quick reference
-
-| Question | Tool | Input |
-|---|---|---|
-| Understand a symbol fast (source + who uses it + what implements it) | `explore` | `"create_order"` |
-| Where is `create_order` defined? | `search_symbols` | `"create_order"` |
-| Where is `Location` defined? (common noun) | `get_file_structure` | known file path |
-| Find auth-related code (no name) | `search_semantic` | `"authentication flow"` |
-| What symbols are in `order_service.py`? | `get_file_structure` | `"order_service.py"` |
-| What's in the `authz/` directory? | `search_symbols` | `"authz."` |
-| What does `create_order` call internally? | `get_callees` | node_id, depth=2 |
-| Who calls `create_order`? (impact) | `get_callers` | node_id, depth=3 |
-| **What implements / extends / subclasses `X`?** | `get_implementors` | node_id |
-| What references `OrderService`? (type annotations) | `find_references` | node_id |
-| Show source + signature of a symbol | `get_node_info` | node_id |
-| Find a string literal / log / comment | `search_code` | escaped regex pattern |
-| Find code similar to this symbol | `find_related` | node_id |
-| How does Python service talk to TS client? | `get_cross_language_calls` | node_id |
-| What's around this class in the graph? | `get_neighbors` | node_id, depth=2 |
-| What is this codebase about? / orient | `list_clusters` | — |
-| What's the semantic neighborhood of a symbol? | `get_cluster` | node_id |
+| `grep -r "pattern" .` | `search("pattern")` |
+| `grep -r "def foo\|class Foo"` | `search("foo")` |
+| `cat file.py \| grep def` | `info("path/to/file.py")` (outline) |
+| `grep -r "Interface"` to find implementations | `relations("Interface")` — never guess from grep |
+| Read whole file to find a function | `info("path/to/file.py")` → `info("SymbolName")` |
+| Read file to find callers | `relations("name")` — no file reads, no prior lookup |
+| Read a file to edit it | `info("path", mode="source")` — line-numbered, Read-equivalent |
 
 ## Impact analysis workflow
 
 When asked "what breaks if I change X?":
-1. `get_callers("X", max_depth=5)` → direct and transitive callers (pass the
-   name directly; use `search_semantic("X behavior")` first only if unsure of the name)
-2. `find_references("X")` → non-call usages (type annotations, assignments)
-3. `get_cross_language_calls(id)` → cross-service consumers
-5. Summarise affected symbols — do **not** read every caller file; use
-   `get_node_info` only for ones that need elaboration.
+1. `relations("X", depth=3)` → callers, callees, implementors, and references
+   in one call (pass the name directly; `search` first only if unsure of it).
+2. If a list is truncated (its `*_total` exceeds what's shown), narrow with
+   `search` and distinguishing terms rather than re-calling `relations` with a
+   bigger `limit` — it won't reveal more.
+3. Summarise affected symbols — use `info` only on the ones that need
+   elaboration, not every caller.
 
-## Understanding external symbols (file_path: null)
+## Respect resolver_status and indexing
 
-Any node with `file_path: null` is an **external stub** — it represents a symbol
-from a library or another service, not something defined locally. You cannot read
-its source via `get_node_info`. Instead:
-- Use `get_callers(id)` to see where it is called in your codebase
-- Use `search_symbols("pkg.SymbolName")` to find the local wrapper/adapter if any
-- It still participates in the call graph — callers and edges are valid
+Every response carries:
+- `resolver_status`: `"ok"` (full graph, edges trustworthy) or `"degraded"`
+  (calls/types not fully resolved, usually a missing language toolchain) —
+  treat edges as approximate when degraded, and suggest `graphlens-mcp
+  reindex` or installing the missing toolchain if it comes up.
+- `indexing`: `true` means a (re)index is still running — the graph is
+  **incomplete right now**. An empty `relations` result or a not-found
+  symbol may simply be unindexed yet. Do **not** conclude a symbol is
+  unused/dead/safe to delete while `indexing: true` — say the index is
+  still building and retry shortly.
 
-## Respect resolver_status
+## Don't fight the repeat guard
 
-Each response includes `resolver_status` across all returned nodes' files:
-- `ok` — full semantic graph, edges are trustworthy
-- `degraded` — calls/types not fully resolved (usually a missing language toolchain);
-  treat edges as approximate, supplement with `search_code` for confirmation
-
-When `degraded`, say so and suggest `graphlens-mcp reindex` or installing the
-missing language toolchain (e.g. Node.js for TypeScript, the Go toolchain for Go,
-rust-analyzer for Rust — Python ships its `ty` engine bundled).
-
-## Respect indexing
-
-Responses also carry `indexing` (boolean). `indexing: true` means a (re)index is
-still running, so the graph is **incomplete right now** — an empty `get_callers`,
-a missing edge, or a not-found symbol may simply be unindexed yet.
-
-- **Do NOT** conclude a symbol is unused, unreferenced, dead, or safe to delete
-  while `indexing: true`. Say the index is still building and retry shortly.
-- This happens mainly right after the server starts (it serves immediately and
-  catches up in the background) or just after large edits.
+If you call `search`, `relations`, or `info` with the exact same arguments
+twice, the response carries a `repeat_hint` — the result is deterministic and
+won't change. On the third identical call, the tool returns `BLOCKED` instead
+of data. If the answer isn't in what you already have, change the query,
+narrow with `path_glob`/`file`, switch tools, or answer with your best
+current evidence — don't just repeat the call.
 
 ## Hard rules
 
-- **Never** shell out to `grep` or `rg` — use `search_code`
-- **Never** read entire source files to find callers — use `get_callers`
-- **Never** search a bare common noun and trust the result — use qualified name,
-  `get_file_structure`, or `search_semantic`
-- **Never** pass a directory to `get_file_structure` — it returns empty
-- **Escape** regex metacharacters in `search_code` patterns
-- **Don't assume** an edge list is complete when `resolver_status != ok`
-- **Don't conclude "unused / dead / safe to delete"** when `indexing: true` —
-  the graph is still building; retry shortly
+- **Never** shell out to `grep`/`rg`/`find` for code navigation — use `search`
+- **Never** read entire source files to find callers — use `relations`
+- **Never** pass a directory to `info` — it expects a file or symbol
+- **Don't assume** a list is complete when `resolver_status != "ok"`
+- **Don't conclude "unused / dead / safe to delete"** when `indexing: true`

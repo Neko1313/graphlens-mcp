@@ -1,0 +1,25 @@
+# Cloned target codebases (large, regenerable via `main.py` / git clone).
+/targets/
+
+# Per-arm index caches built inside the targets are already covered by /targets,
+# but keep these patterns in case indices are built elsewhere.
+**/.graphlens/
+**/.codegraph/
+**/.semble/
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Secrets
+.env
+
+# Run artifacts that should NOT be committed (large / machine-specific). NOTE:
+# result JSONL under data/ IS committed (it is the benchmark output of record),
+# but the warmed-graph dumps and proxy logs are not.
+/data/*.graph.json
+/bench_overnight.log
+/.bench.pgid

@@ -1,0 +1,95 @@
+{
+  "engine": "pydantic-ai + OpenRouter",
+  "models": {
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
+    "gemma-4-26b": "google/gemma-4-26b-a4b-it",
+    "gpt-oss-20b": "openai/gpt-oss-20b"
+  },
+  "arms": [
+    "graphlens",
+    "codegraph",
+    "semble",
+    "none"
+  ],
+  "projects": {
+    "gin": {
+      "repo": "gin-gonic/gin",
+      "tag": "v1.10.0",
+      "languages": [
+        "go"
+      ]
+    },
+    "echo": {
+      "repo": "labstack/echo",
+      "tag": "v4.12.0",
+      "languages": [
+        "go"
+      ]
+    },
+    "ripgrep": {
+      "repo": "BurntSushi/ripgrep",
+      "tag": "14.1.1",
+      "languages": [
+        "rust"
+      ]
+    },
+    "clap": {
+      "repo": "clap-rs/clap",
+      "tag": "v4.5.20",
+      "languages": [
+        "rust"
+      ]
+    },
+    "fastapi": {
+      "repo": "fastapi/fastapi",
+      "tag": "0.115.0",
+      "languages": [
+        "python"
+      ]
+    },
+    "click": {
+      "repo": "pallets/click",
+      "tag": "8.1.7",
+      "languages": [
+        "python"
+      ]
+    },
+    "httpx": {
+      "repo": "encode/httpx",
+      "tag": "0.27.2",
+      "languages": [
+        "python"
+      ]
+    },
+    "hono": {
+      "repo": "honojs/hono",
+      "tag": "v4.6.0",
+      "languages": [
+        "typescript"
+      ]
+    },
+    "zod": {
+      "repo": "colinhacks/zod",
+      "tag": "v3.23.8",
+      "languages": [
+        "typescript"
+      ]
+    },
+    "superset": {
+      "repo": "apache/superset",
+      "tag": "6.0.0",
+      "languages": [
+        "python",
+        "typescript"
+      ]
+    }
+  },
+  "n_seeds": 2,
+  "concurrency": 8,
+  "max_turns": 40,
+  "versions": {
+    "codegraph": "1.0.1",
+    "semble": "",
+    "graphlens-mcp": ""
+  }
+}

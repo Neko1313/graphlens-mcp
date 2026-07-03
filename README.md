@@ -51,19 +51,35 @@ worse in others, but honest about which (see [How it compares](#how-it-compares)
 ## How it compares
 
 `graphlens-mcp` ships with a reproducible **A/B benchmark** ([`benchmarks/`](benchmarks/README.md))
-that drives the same agent against four interchangeable code-context MCP servers —
-`graphlens`, `semble` (semantic search), `codegraph` (graph index), and a `filesystem`
-(grep + read) baseline — plus a **no-tools control** that measures how much each server adds
-over the model's own memory. It runs across real **Go / Rust / Python / TypeScript** codebases
-and grades answers **deterministically against oracle gold** (no LLM judge),
-stratified into SIMPLE lookups vs HARD impact / cross-file questions, and reports accuracy
-**alongside** token / tool-call / dollar cost — because a cheaper arm at equal accuracy wins.
+that drives the same agent against three interchangeable code-context MCP servers —
+`graphlens`, `semble` (semantic search), and `codegraph` (graph index) — plus a **no-tools
+control** that measures how much each server adds over the model's own memory. It runs across
+real **Go / Rust / Python / TypeScript** codebases and grades answers **deterministically
+against oracle gold** (no LLM judge), stratified into SIMPLE lookups vs HARD impact /
+cross-file questions, and reports accuracy **alongside** token / tool-call / dollar cost —
+because a cheaper arm at equal accuracy wins.
 
 <!-- BENCHMARK-RESULTS:START -->
-> 📊 **Results: _coming soon._** A headline table (accuracy + tokens + cost per language,
-> vs the `filesystem` baseline and the `none` control) lands here once the current run
-> completes. Until then, see [`benchmarks/README.md`](benchmarks/README.md) for the full
-> methodology and to reproduce it yourself.
+> 📊 **Results** (10 repos · 3 models, strong → genuinely weak · ~2,400 graded runs —
+> full breakdown, significance tests and reproduction steps at
+> [**docs: Benchmarks**](https://neko1313.github.io/graphlens-mcp/benchmarks)):
+>
+> | | SIMPLE accuracy | HARD accuracy | HARD tokens (median) | HARD completion |
+> |---|---|---|---|---|
+> | **graphlens** | 0.980 – 1.000 | 0.899 – 0.921 | **22.4k – 34.1k** | **≥ 0.959 on every model** |
+> | codegraph | 0.912 – 0.990 | 0.655 – 0.939 | 23.2k – 70.0k | drops to 0.765 on the weakest model |
+> | semble | 0.647 – 0.961 | 0.555 – 0.850 | 21.6k – 74.9k | drops to 0.688 on the weakest model |
+> | none (control) | 0.366 – 0.681 | 0.453 – 0.685 | 0.1k – 0.9k | — |
+>
+> Accuracy alone hides the number that matters to a bill: **tokens paid per task**. graphlens's
+> HARD-tier token spend stays flat (22k–34k) whether the driving model is strong or weak;
+> codegraph's and semble's balloon past 70k on the weakest model — more than double
+> graphlens's ceiling — for a *worse* answer, not a better one. graphlens is the only arm that
+> stays clearly ahead of the no-tools control **and** keeps completion above 0.95 at every
+> model tier: on the weakest model tested (gpt-oss-20b) it holds 0.900 HARD accuracy at
+> roughly **half the token cost** of codegraph. Pairwise Wilcoxon signed-rank tests (matched by
+> task) confirm the gap is statistically significant on the weaker models, not an artifact of a
+> few outlier tasks — see the notebook for per-model p-values and effect sizes.
 <!-- BENCHMARK-RESULTS:END -->
 
 ## Install
@@ -124,36 +140,23 @@ resolved) with an install hint — it never blocks `init`.
 
 ## Agent tools
 
-Each response carries a graph-quality status (`ok` | `degraded`) so the agent never mistakes
-a partial answer for a complete one, plus an `indexing` flag (`true` when a background reindex
-is running, so edges may be temporarily incomplete).
+Three tools — everything a symbol or file needs comes back as a navigable graph **node**,
+not a dead grep line. Each response carries a graph-quality status (`ok` | `degraded`) so the
+agent never mistakes a partial answer for a complete one, plus an `indexing` flag (`true`
+when a background reindex is running, so edges may be temporarily incomplete).
 
 | Tool | Purpose |
 |---|---|
-| `explore` | One call: a symbol's source + signature plus its direct callers, callees, implementors and references — **the first call for "what is X / who uses it / what implements it"** |
-| `search_symbols` | Full-text search over symbol names — **start here** |
-| `get_node_info` | Source snippet + signature + location for a node |
-| `get_file_structure` | Symbol outline of a file |
-| `get_callees` | What a function calls (outgoing, up to `max_depth`) |
-| `get_callers` | Who calls a function — primary impact-analysis tool |
-| `get_neighbors` | Nodes within N hops in any direction |
-| `find_references` | Non-call usages (type annotations, assignments) |
-| `get_implementors` | Subclasses / interface implementors / embedders of a symbol (reverse `inherits_from` walk) — "what implements / extends / subclasses X?" |
-| `get_cross_language_calls` | Connections across service boundaries (HTTP/gRPC/queues) |
-| `search_code` | Regex/text over file **content** — the grep replacement (string literals, logs, comments, config) |
-| `search_semantic` | Search by **meaning**; each hit carries the graph node ids it overlaps |
-| `find_related` | Find code semantically similar to a symbol |
-| `list_clusters` | Labeled semantic zones of the codebase (auth, serialization, …) |
-| `get_cluster` | The cluster a symbol belongs to and its sibling members |
+| `search` | Find code by NAME, CONTENT, or MEANING — **the one way in**. Returns graph nodes with their signature (often enough to answer without a follow-up call). Content is matched literally, not as a regex. Scope with `path_glob` (e.g. `"tests/*"`, `"*.ts"`, `"!tests/*"` to exclude a subtree); set `exhaustive=true` to list every matching file (no cap, no signatures) instead of the ranked top-N |
+| `relations` | A symbol's neighbourhood in one call: callers, callees, implementors/subclasses, and non-call references — each with its signature. **The** impact-analysis tool ("what breaks if I change X?", "what implements X?") |
+| `info` | Read a specific target: a symbol (node id or name) → source + signature + location; a file path → its symbol outline |
 
-The relation tools (`get_callers`, `get_callees`, `get_neighbors`, `find_references`,
-`get_implementors`, `get_node_info`, `get_cross_language_calls`) accept either a symbol
-**name** or a node id directly — you don't need to look up a node id first.
-
-The four semantic tools (`search_semantic`, `find_related`, `list_clusters`,
-`get_cluster`) ship in the box — no extra to install. If the embedding model can't be
-fetched (e.g. a first run with no network), they return `available=false` with a reason
-and the agent falls back to `search_symbols` / `search_code` rather than failing.
+`search` and `relations` accept either a symbol **name** or a node id directly — you don't
+need to look up a node id first. Both cap their response size (a large hit set is ranked by
+relevance via a small bundled embedding model, not just truncated) and surface true counts
+(`callers_total`, `references_total`, …) when a list is capped, so the agent sees "15 shown
+of 22" instead of guessing. If the embedding model can't be fetched (e.g. a first run with no
+network), search transparently falls back to name/content matching.
 
 ## Freshness model
 

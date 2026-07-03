@@ -1,4 +1,4 @@
-"""Unit tests for the tool layer: status aggregation + node-info metadata surfacing."""
+"""Unit tests for the tool layer: status aggregation + info metadata surfacing."""
 
 from __future__ import annotations
 
@@ -7,12 +7,10 @@ import json
 import pytest
 from graphlens import GraphLens, Node, NodeKind, make_node_id
 
+from graphlens_mcp.indexer.semantic import _first_meta
 from graphlens_mcp.indexer.workspace import Workspace
-from graphlens_mcp.server.tools import (
-    _aggregate_status,
-    _first_meta,
-    tool_get_node_info,
-)
+from graphlens_mcp.server.lean import tool_info
+from graphlens_mcp.server.tools import _aggregate_status
 from tests.conftest import graph_of, make_node
 
 pytestmark = [pytest.mark.unit, pytest.mark.tools]
@@ -56,7 +54,7 @@ def test_first_meta_picks_first_present_string_key():
     assert _first_meta(None, ("signature",)) is None
 
 
-async def test_get_node_info_surfaces_signature_and_docstring(store, tmp_path):
+async def test_info_surfaces_signature_and_docstring(store, tmp_path):
     # Arrange: a fileless node carrying signature/docstring metadata (no disk read needed)
     node = Node(
         id=make_node_id("test", "pkg.add", NodeKind.FUNCTION.value),
@@ -71,7 +69,7 @@ async def test_get_node_info_surfaces_signature_and_docstring(store, tmp_path):
     await store.apply_structural(g)
     ws = Workspace(store, tmp_path)
     # Act
-    info = await tool_get_node_info(store, ws, node.id)
+    info = await tool_info(store, ws, node.id)
     # Assert
     assert info.signature == "(x: int) -> int"
     assert info.docstring == "Adds one."

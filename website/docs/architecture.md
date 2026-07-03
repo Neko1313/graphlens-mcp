@@ -82,8 +82,8 @@ new/deleted/edited paths through `reindex_connected`. A wholesale rebuild remain
 6. **Dangling edges, no foreign keys.** An edge references its target by stable id, which
    may be momentarily absent during re-index. There is **no** FK/CASCADE (it would reject
    such edges); unresolved targets are filtered at read time instead.
-7. **Cycle-safe traversal.** `get_callees/callers/neighbors` use recursive CTEs with a
-   visited-path guard, so cyclic call graphs terminate without exponential blow-up.
+7. **Cycle-safe traversal.** The store's callers/callees/implementors walks use recursive CTEs
+   with a visited-path guard, so cyclic call graphs terminate without exponential blow-up.
 8. **Atomic, rolled-back writes.** Every write runs under `SqliteStore._writing` — the
    single-writer lock plus commit-on-success / rollback-on-error — so a failed multi-statement
    patch can never leave a partial transaction for the next writer.
@@ -93,49 +93,44 @@ new/deleted/edited paths through `reindex_connected`. A wholesale rebuild remain
 
 ## Storage
 
-SQLite with `nodes`, `edges`, `deps`, `files`, `meta`, `clusters`, `node_clusters` and an
-FTS5 index over symbol names. A dedicated **writer** connection serializes all writes behind
-a write lock (so multi-statement patches are atomic), while a separate read-only connection
-serves queries from the last committed WAL snapshot without queuing behind an in-flight
-write. WAL is enabled for crash-safety and reader/writer concurrency.
+SQLite with `nodes`, `edges`, `deps`, `files`, `meta` and an FTS5 index over symbol names. A
+dedicated **writer** connection serializes all writes behind a write lock (so multi-statement
+patches are atomic), while a separate read-only connection serves queries from the last
+committed WAL snapshot without queuing behind an in-flight write. WAL is enabled for
+crash-safety and reader/writer concurrency.
 
 ## Semantic layer
 
-Lets agents search by *meaning* and by *content* — the cases that otherwise send them back
-to `grep`. It is part of the base install (`model2vec`, `numpy` and `scikit-learn` are core
-dependencies), not an optional extra. See [Semantic search & clustering](./design/semantic-search.md)
-for the design.
+Lets `search` fall back to matching by **meaning** when name/content matching comes up thin —
+the case that otherwise sends an agent back to grep. It is part of the base install
+(`model2vec` is a core dependency), not an optional extra.
 
-- **Content search** (`search_code`) is the grep replacement: regex/text over file content
+- **Content matching** inside `search` is the grep replacement: literal text over file content
   via ripgrep with a pure-Python fallback. Uses no model at all.
-- **Semantic search** (`search_semantic`, `find_related`) embeds the graph's **nodes**
-  (functions/methods/classes) directly with the `model2vec` static model
-  (`minishlab/potion-code-16M`) and ranks by in-process **cosine similarity** over a cached
-  vector matrix. There is no file chunking and no chunk→node bridge — *each hit is already a
-  graph node*, so a "found by meaning" result pivots straight into `get_callers`/`get_callees`.
-- **Clusters** (`list_clusters`, `get_cluster`) group those same node embeddings with
-  **HDBSCAN** (scikit-learn) into auto-labeled semantic zones. Sparse nodes are left
-  unclustered; clusters describe dense zones, not a forced partition.
+- **Semantic matching** embeds the graph's **nodes** (functions/methods/classes) directly with
+  the `model2vec` static model (`minishlab/potion-code-16M`) and ranks by in-process **cosine
+  similarity** over a cached vector matrix. There is no file chunking and no chunk→node bridge
+  — *each hit is already a graph node*, so a "found by meaning" result pivots straight into
+  `relations`/`info`.
 
-The float32 vectors are stored **in SQLite** alongside the graph (no sidecar index); clusters
-live in the `clusters`/`node_clusters` tables and, like edges, carry **no foreign key** (a
-cluster row may briefly outlive a node mid-reindex; unresolved members are filtered at read
-time). The heavy packages are imported at module top level — so the only graceful-degradation
-path that remains is a **model-download failure** (offline, blocked HF egress): it is stored
-as a sticky reason and surfaced via `available=false`, and the graph server keeps working.
+The float32 vectors are stored **in SQLite** alongside the graph (no sidecar index). The model
+is imported at module top level — so the only graceful-degradation path that remains is a
+**model-download failure** (offline, blocked HF egress): it is stored as a sticky reason and
+surfaced via `available=false`, and the graph server keeps working with name/content matching
+only.
 
 ### Unified index cycle & resume
 
-`full_index` runs three phases in order — **graph → semantic → clusters** — recording a
-resume checkpoint in `meta` after each (`index_phase`, with `index_root_hash` =
-`files_fingerprint`). The semantic phases are best-effort: if the embedding model can't be
-fetched (offline) the graph index still completes and the checkpoint rests at the graph
-phase. Incremental edits (`reindex_connected`) only *mark* the semantic index and clusters
-stale — re-clustering per file save would be wasteful — and they rebuild lazily on the next
-semantic/cluster query. `serve` calls `resume_pending_index` after `reconcile`: it finishes
-a tail (clustering) that a prior crash interrupted when the fingerprint still matches, and
-otherwise marks the layer stale for lazy rebuild. This is the checkpoint/resume the project
-needs for expensive index work without taking on a durable-workflow framework (e.g. DBOS).
+`full_index` runs two phases in order — **graph → semantic** — recording a resume checkpoint
+in `meta` after each (`index_phase`, with `index_root_hash` = `files_fingerprint`). The
+semantic phase is best-effort: if the embedding model can't be fetched (offline) the graph
+index still completes and the checkpoint rests at the graph phase. Incremental edits
+(`reindex_connected`) only *mark* the semantic index stale — re-embedding per file save would
+be wasteful — and it rebuilds lazily on the next semantic query. `serve` calls
+`resume_pending_index` after `reconcile`: it finishes an embedding pass a prior crash
+interrupted when the fingerprint still matches, and otherwise marks the layer stale for lazy
+rebuild. This is the checkpoint/resume the project needs for expensive index work without
+taking on a durable-workflow framework (e.g. DBOS).
 
 ## Cache, not system of record
 
@@ -148,11 +143,12 @@ pure overhead for a cache you can rebuild in seconds with `reindex`.
 ## Tool boundary
 
 Every MCP tool returns a typed Pydantic model (`server/models.py`). List responses carry
-`resolver_status` (`ok` | `degraded` | `skeleton`, aggregated across every returned node's
-file), an `indexing` flag (a background reindex is in progress, so edges may be incomplete)
-and a `truncated` flag; results are capped (`MAX_RESULTS`), and an oversized `limit` /
-`max_depth` is clamped rather than rejected. File-touching tools run the freshness check
-first; relative paths resolve against the project root, not the server cwd.
+`resolver_status` (`ok` | `degraded`, aggregated across every returned node's file — there is
+no structure-only "skeleton" state, every index is a full analyze), an `indexing` flag (a
+background reindex is in progress, so edges may be incomplete) and a `truncated` flag; results
+are capped (`MAX_RESULTS`, 200), and an oversized `limit` / `depth` is clamped rather than
+rejected. File-touching tools run the freshness check first; relative paths resolve against
+the project root, not the server cwd.
 
 ## Known limitations
 

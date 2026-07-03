@@ -1,0 +1,75 @@
+# Lint config mirroring the graphlens-mcp project ruff.toml (curated select,
+# line-length 79, autofix on). Relaxations are applied to the CLI/entry and test
+# code (print-heavy harness scripts), mirroring how the project relaxes tests/**.
+line-length = 79
+target-version = "py313"
+fix = true
+unsafe-fixes = true
+
+[lint]
+ignore = [
+    "D203",
+    "D212",
+    "S101",
+    "RUF002",
+    "ANN401",
+    "RUF001",
+    "RUF003",
+    "S603",
+    "RUF012",
+    # `ruff format` already wraps CODE to line-length; E501 then only fires on
+    # unbreakable strings (embedded task prompts, long URLs, docstring prose),
+    # so we let the formatter own width and silence the residual noise.
+    "E501",
+    # Harness, not a shipped API: design is documented in module docstrings;
+    # per-symbol docstrings on small private helpers aren't required.
+    "D101",
+    "D102",
+    "D103",
+    "D105",
+    "D107",
+]
+select = [
+    "A",
+    "B",
+    "F",
+    "I",
+    "Q",
+    "ASYNC",
+    "N",
+    "W",
+    "UP",
+    "T20",
+    "SIM",
+    "ANN",
+    "PL",
+    "PT",
+    "RET",
+    "E",
+    "S",
+    "C4",
+    "EM",
+    "DTZ",
+    "RUF",
+    "TCH",
+    "ARG",
+    "DOC",
+    "D",
+]
+
+[lint.pylint]
+max-args = 7
+
+[lint.per-file-ignores]
+# Tests: same relaxations as the project.
+"tests/**" = ["ANN", "D", "PLR", "ARG", "E501", "S", "N", "PLC", "PT", "SIM"]
+# CLI orchestrator + helper scripts are print-driven entrypoints (T20 ok) and not
+# a shipped library, so docstring-per-symbol (D) and subprocess (S) rules relax.
+"main.py" = ["T20", "S", "PLR", "DOC"]
+"scripts/**" = ["T20", "D", "S", "PLR", "ARG", "DOC", "INP"]
+# setup.py shells out to clone/index and prints progress.
+"bench/setup.py" = ["T20", "S"]
+# Notebook: print() is deliberate narrative output between display() tables,
+# and the significance-test thresholds (p < 0.05 etc.) are self-evidently
+# meaningful in context, not unexplained magic numbers.
+"metrics.ipynb" = ["T20", "PLR2004"]
