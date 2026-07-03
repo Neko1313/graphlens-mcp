@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-07-03
+### Features
+
+- **server**: accept symbol names, clamp bounds, surface indexing state by @Neko1313
+- lean 3-tool surface is core; port codegraph quality fixes; benchmark suite + report by @Neko1313
+
+
+
+
+**Full Changelog**: https://github.com/Neko1313/graphlens-mcp/compare/v0.3.0...v0.4.0
 ## [0.3.0] - 2026-06-29
 ### Features
 
