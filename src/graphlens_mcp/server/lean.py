@@ -528,8 +528,19 @@ async def _search_nodes(
             nodes.pop()
         over = True
     status = await _aggregate_status(store, "ok", capped)
+    via_shown = via[: len(nodes)]
+    # Two independent signals that the query never matched real code, either
+    # of which alone should warn: the query *looks* like a literal snippet
+    # (the old check — misses bare words/identifiers with no punctuation,
+    # e.g. "message=" or "foo_bar"), or — regardless of what the query looks
+    # like — every node actually shown is a semantic guess (no name/content
+    # hit at all backs it). Checking only the former let a 100%-guessed
+    # result through silently whenever the query didn't happen to contain
+    # one of a fixed set of punctuation characters.
+    all_guessed = bool(via_shown) and all(h == "meaning" for h in via_shown)
+    no_confirmed_hit = not content_nodes and not text_only
     note = None
-    if _looks_literal(query) and not content_nodes and not text_only:
+    if no_confirmed_hit and (_looks_literal(query) or all_guessed):
         note = (
             f"No literal match for {query!r} anywhere in the code — every "
             "node below came from name/meaning matching, not a confirmed "
@@ -538,7 +549,7 @@ async def _search_nodes(
         )
     return SearchResult(
         nodes=nodes,
-        via=via[: len(nodes)],
+        via=via_shown,
         text_matches=text_only,
         count=len(nodes),
         truncated=truncated or over or len(ordered) > limit,
@@ -586,7 +597,11 @@ async def tool_relations(
     itself mentions "test") so the cap fills with production code, not test
     call-sites. Pass ``file`` (a path or suffix) to pin the right definition
     when several same-named symbols exist (e.g. one ``UserService`` per
-    service in a monorepo).
+    service in a monorepo). An empty ``callers`` does NOT by itself mean
+    unused — a symbol invoked only through a JSX tag, a route decorator, or a
+    DI container (e.g. ``Depends(...)``) has no direct-call edge at all and
+    shows up in ``references`` instead; when that's the case ``note`` is set
+    so you don't have to remember to check.
     """
     args_key = json.dumps(
         {"symbol": symbol, "depth": depth, "limit": limit, "file": file},
@@ -639,6 +654,15 @@ async def tool_relations(
     status = await _aggregate_status(
         store, base, callers + callees + implementors + references
     )
+    note = None
+    if not callers and references:
+        note = (
+            "callers is empty, but references is not — this symbol has no "
+            "direct-call site, yet something in the code still refers to "
+            "it (a JSX tag, a route decorator, a DI container like "
+            "Depends(...), a passed-as-value callback, …). Check references "
+            "before concluding this is unused."
+        )
     return RelationsResult(
         node=NodeRef.from_row(node),
         callers=caller_refs,
@@ -653,6 +677,7 @@ async def tool_relations(
         truncated=t1 or t2 or t3 or t4 or over,
         indexing=workspace.is_indexing,
         repeat_hint=hint,
+        note=note,
     )
 
 

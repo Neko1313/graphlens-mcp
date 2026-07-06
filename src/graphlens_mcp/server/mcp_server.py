@@ -113,7 +113,11 @@ def create_mcp(store: SqliteStore, workspace: Workspace) -> FastMCP:
             "depth 2, limit 25). THE tool for impact analysis and 'what "
             "implements X'. If the name matches several definitions, pass "
             "file (a path or suffix) to pin the right one — e.g. one "
-            "UserService per service in a monorepo."
+            "UserService per service in a monorepo. Empty callers does NOT "
+            "mean unused by itself — a symbol reached only via a JSX tag, a "
+            "route decorator, or a DI container (Depends(...)) has no call "
+            "edge and shows up under references instead; note is set when "
+            "that's the case."
         )
     )
     async def relations(
