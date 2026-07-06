@@ -113,7 +113,7 @@ _MAX_BOUNDARY_FANOUT = 2000
 # hours or days earlier by a different session would silently pre-block a
 # genuinely first attempt in a new one. Past this age a prior sighting no
 # longer counts as a repeat.
-_REPEAT_TTL_SECONDS = 900.0
+_REPEAT_TTL_SECONDS = 300.0
 
 
 def default_db_path(project_root: Path) -> Path:
