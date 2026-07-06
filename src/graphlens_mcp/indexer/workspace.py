@@ -17,6 +17,7 @@ import contextlib
 import dataclasses
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -106,6 +107,14 @@ _EXCLUDED_DIRS = frozenset(
 # otherwise blow up quadratically).
 _MAX_BOUNDARY_FANOUT = 2000
 
+# A repeated identical call only signals a *stuck agent* when the repeats are
+# close together in time — the server process (and its `_seen_calls` table)
+# outlives any single conversation, so without a TTL an unrelated call made
+# hours or days earlier by a different session would silently pre-block a
+# genuinely first attempt in a new one. Past this age a prior sighting no
+# longer counts as a repeat.
+_REPEAT_TTL_SECONDS = 900.0
+
 
 def default_db_path(project_root: Path) -> Path:
     """Return the default graph database location for *project_root*."""
@@ -145,14 +154,17 @@ class Workspace:
         # into grep-grinding loops (20-40 calls) when the answer isn't
         # greppable; search_code reads this to nudge them back to the graph.
         self._grep_calls = 0
-        # Every (tool, args) call seen this session, for detecting a verbatim
+        # Every (tool, args) call seen recently, for detecting a verbatim
         # repeat anywhere in the run — not just back-to-back. Traced runs
         # showed agents re-issuing an identical search/relations call 2-5x
         # *interleaved* with other calls in a grind (not consecutively),
         # expecting a different result from a deterministic one; this lets
         # the tool notice and say so instead of paying for the same response
-        # again.
-        self._seen_calls: dict[tuple[str, str], int] = {}
+        # again. Keyed to (count, last-seen monotonic time) rather than a
+        # bare count: the Workspace outlives any one conversation, so a
+        # count with no expiry would let calls from an unrelated session
+        # hours earlier pre-block a genuinely first attempt in a new one.
+        self._seen_calls: dict[tuple[str, str], tuple[int, float]] = {}
 
     def note_grep(self) -> int:
         """Record a search_code call; return the running session total."""
@@ -160,11 +172,20 @@ class Workspace:
         return self._grep_calls
 
     def note_call(self, tool: str, args_key: str) -> int:
-        """Record a tool call; return how many times it was already seen."""
+        """
+        Record a tool call; return how many times it was already seen.
+
+        A prior sighting older than ``_REPEAT_TTL_SECONDS`` doesn't count —
+        it's treated as belonging to a different, unrelated session rather
+        than the same stuck loop.
+        """
         key = (tool, args_key)
-        seen = self._seen_calls.get(key, 0)
-        self._seen_calls[key] = seen + 1
-        return seen
+        now = time.monotonic()
+        count, last_seen = self._seen_calls.get(key, (0, now))
+        if now - last_seen > _REPEAT_TTL_SECONDS:
+            count = 0
+        self._seen_calls[key] = (count + 1, now)
+        return count
 
     @classmethod
     async def create(cls, project_root: Path, db_path: Path) -> Workspace:

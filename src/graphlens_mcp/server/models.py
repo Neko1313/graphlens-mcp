@@ -140,6 +140,15 @@ class RelationsResult(BaseModel):
     indexing: bool = False
     error: str | None = None
     repeat_hint: str | None = None
+    # Set only when callers is empty but references is not: a symbol invoked
+    # through something other than a literal call (a JSX tag, a route
+    # decorator, a DI container like FastAPI's Depends(...)) has no CALLS
+    # edge to it at all — the graph correctly records the use as a
+    # reference instead. callers==0 alone reads exactly like "unused", so
+    # without this an agent doing impact/dead-code analysis on a
+    # React/decorator-heavy codebase draws the wrong conclusion from a
+    # technically-accurate empty list.
+    note: str | None = None
 
 
 class InfoResult(BaseModel):
