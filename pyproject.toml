@@ -9,16 +9,21 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "aiosqlite~=0.22.1",
     "graphlens[go,python,rust,typescript,php]~=0.7.0",
+    "kuzu~=0.11.3",
     "mcp[cli]==2.0.0b1",
     "model2vec~=0.8.2",
     "platformdirs>=4.10.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
-    "pymilvus>=3.0.0",
+    "pymilvus[milvus-lite]>=3.0.0",
     "questionary~=2.1.1",
 ]
+
+# Server-tier graph backend (k8s deployments), selected via GRAPHLENS_GRAPH_BACKEND=neo4j.
+# Local/embedded default is kuzu (core dependency above).
+[project.optional-dependencies]
+neo4j = ["neo4j~=6.2.0"]
 
 #[project.scripts]
 #graphlens-mcp = "graphlens_mcp.cli:main"
@@ -26,6 +31,13 @@ dependencies = [
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]
 build-backend = "uv_build"
+
+# The refactor moved off a single src/graphlens_mcp/ package onto a feature-sliced
+# layout with multiple top-level packages (app/entities/features/shared) directly
+# under src/ — tell uv_build about all of them explicitly.
+[tool.uv.build-backend]
+module-name = ["app", "entities", "features", "shared"]
+module-root = "src"
 
 [dependency-groups]
 # Mirrors the graphlens engine: a lint group and a test group, synced together via

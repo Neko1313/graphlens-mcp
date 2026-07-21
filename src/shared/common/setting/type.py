@@ -3,11 +3,10 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, UrlConstraints
-from pydantic.networks import AnyUrl
-from pydantic_core import MultiHostUrl
+from pydantic.networks import AnyUrl, _BaseMultiHostUrl
 
 
-class Neo4jDsn(MultiHostUrl):
+class Neo4jDsn(_BaseMultiHostUrl):
     _constraints = UrlConstraints(
         host_required=True,
         default_port=7687,

@@ -1,6 +1,6 @@
 from mcp.server import MCPServer
 
-from features.info.adapter import add, summarize, greeting
+from features.info.adapter import add, greeting, summarize
 
 
 def register(mcp: MCPServer) -> None:

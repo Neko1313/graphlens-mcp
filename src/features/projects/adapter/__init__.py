@@ -1,9 +1,8 @@
-from features.projects.adapter.resource import greeting
-from features.projects.adapter.tool import add
-from features.projects.adapter.prompt import summarize
+from features.projects.adapter.resource import get_project, list_projects
+from features.projects.adapter.tool import index_project
 
 __all__ = [
-    "greeting",
-    "add",
-    "summarize",
+    "get_project",
+    "index_project",
+    "list_projects",
 ]

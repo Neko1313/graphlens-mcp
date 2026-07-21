@@ -36,6 +36,10 @@ def get_app_dir_data() -> Path:
     return create_dir(get_app_dir().user_data_dir)
 
 @cache
+def get_registry_db_path() -> Path:
+    return get_app_dir_data().joinpath("registry.db")
+
+@cache
 def get_graph_db() -> GraphDB:
     db_settings = get_setting_db()
 
