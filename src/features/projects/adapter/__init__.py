@@ -1,23 +1,21 @@
 from features.projects.adapter.resource import (
-    get_project,
-)
-from features.projects.adapter.resource import (
-    list_projects as list_projects_resource,
+    hydrate_project_resources,
+    register_project_resource,
+    unregister_project_resource,
 )
 from features.projects.adapter.tool import (
     index_project,
+    list_projects,
     refresh_project,
     remove_project,
 )
-from features.projects.adapter.tool import (
-    list_projects as list_projects_tool,
-)
 
 __all__ = [
-    "get_project",
+    "hydrate_project_resources",
     "index_project",
-    "list_projects_resource",
-    "list_projects_tool",
+    "list_projects",
     "refresh_project",
+    "register_project_resource",
     "remove_project",
+    "unregister_project_resource",
 ]

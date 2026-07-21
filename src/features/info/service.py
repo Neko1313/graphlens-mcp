@@ -18,7 +18,7 @@ __all__ = ["get_file_outline", "get_file_source", "get_node", "info"]
 
 _OUTLINE_KINDS = ("class", "function", "method")
 
-InfoResult = NodeInfo | FileOutline | FileSource | Candidates | None
+InfoLookup = NodeInfo | FileOutline | FileSource | Candidates | None
 
 
 def _start_line(span_json: str | None) -> int:
@@ -154,7 +154,7 @@ async def info(  # noqa: PLR0913 - info's optional lookup knobs
     limit: int | None = None,
     offset: int = 0,
     file: str = "",
-) -> InfoResult:
+) -> InfoLookup:
     """Look up a symbol or file. ``target`` is a node id, a symbol name, or a
     file path; ``mode`` chooses outline (default) vs source for a file;
     ``limit``/``offset`` window a file's source; ``file`` disambiguates a name.

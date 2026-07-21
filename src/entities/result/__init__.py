@@ -1,17 +1,32 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from entities.project import Project
+
 __all__ = [
+    "Cancelled",
     "Candidates",
+    "Declined",
     "FileOutline",
     "FileSource",
+    "IndexProjectResult",
+    "Indexed",
+    "InfoResult",
     "NodeInfo",
     "NodeRef",
+    "NotFound",
     "OutlineEntry",
+    "ProjectNotFound",
+    "RefreshProjectResult",
+    "Refreshed",
+    "RelationsLookup",
     "RelationsResult",
+    "RemoveProjectResult",
+    "Removed",
     "SearchHit",
     "SearchResult",
+    "Skipped",
 ]
 
 
@@ -69,9 +84,24 @@ class Candidates(BaseModel):
     candidates: list[NodeRef]
 
 
+class NotFound(BaseModel):
+    """The target didn't resolve to a node or a file."""
+
+    type: Literal["not_found"] = "not_found"
+    target: str
+
+
+InfoResult = Annotated[
+    NodeInfo | FileOutline | FileSource | Candidates | NotFound,
+    Field(discriminator="type"),
+]
+"""The wire result of ``info`` — a discriminated union keyed on ``type``."""
+
+
 class RelationsResult(BaseModel):
     """A symbol's neighbours, split into the four navigation groups."""
 
+    type: Literal["relations"] = "relations"
     node: NodeRef
     depth: int
     kinds: list[str]
@@ -84,6 +114,13 @@ class RelationsResult(BaseModel):
     implementors_total: int = 0
     references: list[NodeRef] = Field(default_factory=list)
     references_total: int = 0
+
+
+RelationsLookup = Annotated[
+    RelationsResult | Candidates | NotFound,
+    Field(discriminator="type"),
+]
+"""The wire result of ``relations`` — discriminated union keyed on ``type``."""
 
 
 class SearchHit(BaseModel):
@@ -107,3 +144,78 @@ class SearchResult(BaseModel):
     project: str
     query: str
     hits: list[SearchHit] = Field(default_factory=list)
+
+
+# --- project management outcomes (discriminated on ``status``) ---
+
+
+class Indexed(BaseModel):
+    """A project was indexed (or re-indexed) in full."""
+
+    status: Literal["indexed"] = "indexed"
+    project: Project
+    languages: list[str]
+    files: int
+    nodes: int
+    relations: int
+    embedded: int
+    resolver_status: dict[str, str]
+
+
+class Refreshed(BaseModel):
+    """An already-registered project was re-indexed from its stored path."""
+
+    status: Literal["refreshed"] = "refreshed"
+    project: str
+    files: int
+    nodes: int
+    relations: int
+    embedded: int
+    resolver_status: dict[str, str]
+
+
+class Removed(BaseModel):
+    """A project's graph, vectors, and registry entry were deleted."""
+
+    status: Literal["removed"] = "removed"
+    project: Project
+
+
+class Skipped(BaseModel):
+    """The user was asked to confirm and answered no."""
+
+    status: Literal["skipped"] = "skipped"
+    reason: str = ""
+
+
+class Declined(BaseModel):
+    """The client declined the elicitation."""
+
+    status: Literal["declined"] = "declined"
+
+
+class Cancelled(BaseModel):
+    """The client cancelled the elicitation."""
+
+    status: Literal["cancelled"] = "cancelled"
+
+
+class ProjectNotFound(BaseModel):
+    """The named project isn't registered."""
+
+    status: Literal["not_found"] = "not_found"
+    project: str
+
+
+IndexProjectResult = Annotated[
+    Indexed | Skipped | Declined | Cancelled,
+    Field(discriminator="status"),
+]
+RefreshProjectResult = Annotated[
+    Refreshed | ProjectNotFound,
+    Field(discriminator="status"),
+]
+RemoveProjectResult = Annotated[
+    Removed | ProjectNotFound | Skipped | Declined | Cancelled,
+    Field(discriminator="status"),
+]

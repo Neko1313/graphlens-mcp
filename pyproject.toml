@@ -16,7 +16,11 @@ dependencies = [
     "platformdirs>=4.10.1",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
-    "pymilvus[milvus-lite]>=3.0.0",
+    "pymilvus[milvus-lite]>=2.6.17,<3",
+    "milvus-lite~=2.4.12",
+    # milvus-lite 2.4.x imports pkg_resources at load time but only declares tqdm.
+    # setuptools>=81 dropped pkg_resources, so cap below that to keep it available.
+    "setuptools<81",
     "questionary~=2.1.1",
 ]
 

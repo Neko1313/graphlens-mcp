@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from mcp.server import MCPServer
 
+from features.projects.adapter import hydrate_project_resources
 from shared.common.context import AppContext
 from shared.common.db.graph import get_graph_store
 from shared.common.db.registry import get_registry_store
@@ -12,11 +13,12 @@ __all__ = ["lifespan"]
 
 
 @asynccontextmanager
-async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
+async def lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     """Resolve the configured stores and verify each is reachable before
     serving a single request — a misconfigured DSN or an unreachable host
     fails startup instead of the first tool call. The registry's schema is
-    ensured here too, so tools never race to create it.
+    ensured here too, so tools never race to create it, and every already-
+    indexed project is re-published as a static resource.
     """
     graph_store = get_graph_store()
     vector_store = get_vector_store()
@@ -26,6 +28,7 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
     await vector_store.check()
     await registry.check()
     await registry.ensure_schema()
+    await hydrate_project_resources(server)
 
     try:
         yield AppContext(

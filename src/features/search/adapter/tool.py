@@ -1,7 +1,6 @@
-from typing import Literal
-
 from mcp_types import ResourceLink, TextContent
 
+from entities.request import SearchParams
 from features.search import service
 from shared.common.db.graph import get_graph_store
 from shared.common.db.registry import get_registry_store, resolve_project
@@ -18,40 +17,32 @@ def _label(kind: str, signature: str, file_path: str, line: int | None) -> str:
     return f"{head} · {where}"
 
 
-async def search(
-    query: str,
-    project: str | None = None,
-    limit: int = 25,
-    path_glob: str | None = None,
-    verbosity: Literal["concise", "detailed"] = "concise",
-    exhaustive: bool = False,
-) -> list[TextContent | ResourceLink]:
+async def search(params: SearchParams) -> list[TextContent | ResourceLink]:
     """Find symbols by meaning, name, or literal content across a project.
 
     Blends semantic (embedding), name-substring, and literal content search.
     ``concise`` returns each hit's signature plus a link to its resource
     (follow it for the full source); ``detailed`` inlines the source.
-    ``exhaustive`` lists every in-scope file path instead. Scope with
-    ``path_glob`` (e.g. ``src/**/*.py``). Pass ``project`` when more than one
-    is indexed. Does NOT index — run ``index_project`` first.
+    ``exhaustive`` lists every in-scope file path instead. Does NOT index —
+    run ``index_project`` first.
     """
     graph_store = get_graph_store()
     registry = get_registry_store()
-    project_id = await resolve_project(registry, project)
+    project_id = await resolve_project(registry, params.project)
     hits = await service.search(
-        graph_store, get_vector_store(), registry, query, project_id,
-        limit, path_glob, exhaustive=exhaustive,
+        graph_store, get_vector_store(), registry, params.query, project_id,
+        params.limit, params.path_glob, exhaustive=params.exhaustive,
     )
 
     blocks: list[TextContent | ResourceLink] = [
         TextContent(
             type="text",
-            text=f"{len(hits)} results for {query!r} in {project_id}",
+            text=f"{len(hits)} results for {params.query!r} in {project_id}",
         ),
     ]
     for hit in hits:
         label = _label(hit.kind, hit.signature, hit.file_path, hit.line)
-        if verbosity == "detailed" and hit.id:
+        if params.verbosity == "detailed" and hit.id:
             src, _ = await service.get_node_source(
                 graph_store, registry, project_id, hit.id,
             )
