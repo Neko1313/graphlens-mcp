@@ -60,11 +60,32 @@ def _discover(root: Path) -> list[tuple[str, LanguageAdapter]]:
     return languages
 
 
+def _under(file: Path, roots: list[Path]) -> bool:
+    resolved = file.resolve()
+    return any(resolved.is_relative_to(sub) for sub in roots)
+
+
+def _collect_files(
+    root: Path,
+    adapter: LanguageAdapter,
+    subpaths: list[str] | None,
+) -> list[Path]:
+    files = adapter.collect_files(root)
+    if not subpaths:
+        return files
+    roots = [(root / sub).resolve() for sub in subpaths]
+    return [f for f in files if _under(f, roots)]
+
+
 def _count_files(
     root: Path,
     languages: list[tuple[str, LanguageAdapter]],
+    subpaths: list[str] | None,
 ) -> int:
-    return sum(len(adapter.collect_files(root)) for _, adapter in languages)
+    return sum(
+        len(_collect_files(root, adapter, subpaths))
+        for _, adapter in languages
+    )
 
 
 async def _analyze(
@@ -72,12 +93,14 @@ async def _analyze(
     languages: list[tuple[str, LanguageAdapter]],
     total: int,
     on_progress: ProgressCallback | None,
+    subpaths: list[str] | None,
 ) -> tuple[GraphLens | None, dict[str, str]]:
     graph: GraphLens | None = None
     resolver_status: dict[str, str] = {}
     for lang, adapter in languages:
         await _report(on_progress, 0, total, f"Analyzing {lang}…")
-        lang_graph = await asyncio.to_thread(adapter.analyze, root)
+        files = _collect_files(root, adapter, subpaths) if subpaths else None
+        lang_graph = await asyncio.to_thread(adapter.analyze, root, files)
         resolver_status[lang] = str(
             lang_graph.metadata.get(RESOLVER_STATUS_KEY, "unknown"),
         )
@@ -176,6 +199,7 @@ async def index_project_graph(
     graph_store: GraphStore,
     vector_store: VectorStore,
     on_progress: ProgressCallback | None = None,
+    subpaths: list[str] | None = None,
 ) -> IndexResult:
     """Analyze a project with graphlens and persist the graph + embeddings.
 
@@ -185,6 +209,7 @@ async def index_project_graph(
     per chunk) so real repos index in seconds. Analysis and embedding run
     before any destructive write, so a failure there leaves an existing index
     intact; re-indexing the same ``project_id`` is then idempotent.
+    ``subpaths`` restricts indexing to those subdirectories (monorepo scope).
     """
     languages = await asyncio.to_thread(_discover, root)
     if not languages:
@@ -192,7 +217,9 @@ async def index_project_graph(
         raise ValueError(msg)
 
     lang_names = [lang for lang, _ in languages]
-    file_total = await asyncio.to_thread(_count_files, root, languages)
+    file_total = await asyncio.to_thread(
+        _count_files, root, languages, subpaths,
+    )
     total = max(file_total, 1)
     await _report(
         on_progress, 0, total,
@@ -200,7 +227,7 @@ async def index_project_graph(
     )
 
     graph, resolver_status = await _analyze(
-        root, languages, total, on_progress,
+        root, languages, total, on_progress, subpaths,
     )
     nodes = list(graph.nodes.values()) if graph is not None else []
     relations = graph.relations if graph is not None else []

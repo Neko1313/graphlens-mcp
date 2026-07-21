@@ -20,4 +20,4 @@ async def relations(
     if result is None:
         msg = f"unknown node {id} in project {project}"
         raise ResourceNotFoundError(msg)
-    return result
+    return result.model_dump()

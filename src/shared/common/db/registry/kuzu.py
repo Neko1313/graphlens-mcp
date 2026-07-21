@@ -58,6 +58,12 @@ class KuzuProjectRegistry:
         )
         return Project.model_validate(rows[0]) if rows else None
 
+    async def remove(self, project_id: str) -> None:
+        await self._store.execute(
+            "MATCH (p:Project {id: $id}) DELETE p",
+            {"id": project_id},
+        )
+
     async def check(self) -> None:
         await self._store.check()
 

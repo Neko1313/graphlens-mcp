@@ -11,6 +11,7 @@ from shared.common.indexing import (
     IndexResult,
     ProgressCallback,
     index_project_graph,
+    persist,
 )
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "get_project",
     "index_project",
     "list_projects",
+    "refresh_project",
+    "remove_project",
 ]
 
 _SLUG_RE = re.compile(r"[^0-9A-Za-z]+")
@@ -67,11 +70,13 @@ async def index_project(
     vector_store: VectorStore,
     registry: ProjectRegistry,
     on_progress: ProgressCallback | None = None,
+    subpaths: list[str] | None = None,
 ) -> IndexResult:
     """Index the project's code graph + embeddings, then register it.
 
     Registration happens last so a failed index (e.g. a path with no
     supported languages) never leaves a phantom entry in the registry.
+    ``subpaths`` restricts indexing to those subdirectories.
     """
     result = await index_project_graph(
         project.path,
@@ -79,9 +84,33 @@ async def index_project(
         graph_store,
         vector_store,
         on_progress,
+        subpaths,
     )
     await registry.add(project)
     return result
+
+
+async def refresh_project(
+    graph_store: GraphStore,
+    vector_store: VectorStore,
+    registry: ProjectRegistry,
+    project_id: str,
+    on_progress: ProgressCallback | None = None,
+) -> IndexResult | None:
+    """Re-index an already-registered project from its stored path.
+
+    None if the project isn't registered.
+    """
+    project = await registry.get(project_id)
+    if project is None:
+        return None
+    return await index_project_graph(
+        project.path,
+        project.id,
+        graph_store,
+        vector_store,
+        on_progress,
+    )
 
 
 async def list_projects(registry: ProjectRegistry) -> list[Project]:
@@ -93,3 +122,15 @@ async def get_project(
     project_id: str,
 ) -> Project | None:
     return await registry.get(project_id)
+
+
+async def remove_project(
+    graph_store: GraphStore,
+    vector_store: VectorStore,
+    registry: ProjectRegistry,
+    project_id: str,
+) -> None:
+    """Delete a project's graph nodes, vectors, and registry entry."""
+    await persist.clear_project(graph_store, project_id)
+    await vector_store.drop_collection(project_id)
+    await registry.remove(project_id)

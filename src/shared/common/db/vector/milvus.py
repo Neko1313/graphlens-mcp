@@ -98,6 +98,16 @@ class MilvusVectorStore:
             self._client.delete, collection, filter=filter_expr
         )
 
+    async def drop_collection(self, collection: str) -> None:
+        exists = await asyncio.to_thread(
+            self._client.has_collection, collection,
+        )
+        if exists:
+            await asyncio.to_thread(
+                self._client.drop_collection, collection,
+            )
+        self._loaded.discard(collection)
+
     async def check(self) -> None:
         await asyncio.to_thread(self._client.list_collections)
 

@@ -41,6 +41,10 @@ class VectorStore(Protocol):
         """Delete every row matching the filter expression."""
         ...
 
+    async def drop_collection(self, collection: str) -> None:
+        """Drop a whole collection (no-op if it doesn't exist)."""
+        ...
+
     async def check(self) -> None:
         """Raise if the store can't be reached.
 

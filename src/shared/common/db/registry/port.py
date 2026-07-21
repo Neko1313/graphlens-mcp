@@ -29,6 +29,10 @@ class ProjectRegistry(Protocol):
         """One project by id, or ``None`` if it isn't registered."""
         ...
 
+    async def remove(self, project_id: str) -> None:
+        """Delete a project's registry entry (no-op if absent)."""
+        ...
+
     async def check(self) -> None:
         """Raise if the registry can't be reached."""
         ...

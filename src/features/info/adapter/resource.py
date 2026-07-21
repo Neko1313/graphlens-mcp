@@ -15,22 +15,24 @@ async def node(project: str, id: str) -> dict[str, object]:  # noqa: A002
     if result is None:
         msg = f"unknown node {id} in project {project}"
         raise ResourceNotFoundError(msg)
-    return result
+    return result.model_dump()
 
 
-async def source_file(project: str, path: str) -> str:
-    """Read a file's full source."""
-    text = await service.get_file_source(get_registry_store(), project, path)
-    if text is None:
+async def source_file(project: str, path: str) -> dict[str, object]:
+    """Read a file's source and the files that import from it."""
+    result = await service.get_file_source(
+        get_graph_store(), get_registry_store(), project, path,
+    )
+    if result is None:
         msg = f"file not found: {path} in project {project}"
         raise ResourceNotFoundError(msg)
-    return text
+    return result.model_dump()
 
 
 async def source_file_outline(
     project: str,
     path: str,
-) -> list[dict[str, object]]:
+) -> dict[str, object]:
     """Read a file's outline: its symbols and their line numbers."""
     result = await service.get_file_outline(
         get_graph_store(), get_registry_store(), project, path,
@@ -38,4 +40,4 @@ async def source_file_outline(
     if result is None:
         msg = f"file not found: {path} in project {project}"
         raise ResourceNotFoundError(msg)
-    return result
+    return result.model_dump()

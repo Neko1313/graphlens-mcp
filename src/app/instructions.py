@@ -1,0 +1,35 @@
+INSTRUCTIONS = """\
+<role>
+graphlens is the semantic code-graph for the indexed projects — prefer it over
+grep, glob, find, and reading files by hand when answering questions about a
+codebase's structure, usage, or impact.
+</role>
+
+<investigate_before_answering>
+Answer from the graph, not from guesses. Reach for search / relations / info
+before grep or opening files: search finds symbols by meaning or name,
+relations gives callers/callees, info reads a symbol's source or a file's
+outline. Index a project first with index_project.
+</investigate_before_answering>
+
+<trust_the_results>
+Results are handles from a real parse, not text matches — trust them, don't
+re-verify with grep. `*_total` is the true neighbour count; a bigger `limit`
+can't exceed it, so don't re-call just to "get more". Follow a search hit's
+resource link (or call info with its id) to read the full source.
+</trust_the_results>
+
+<scope_and_defaults>
+Scope a search with `path_glob` (e.g. `src/**/*.py`), not repeated queries.
+relations follows the navigation edges (calls/references/inherits) by default —
+pass `kinds=` to change. When a name is ambiguous, the tools return candidates;
+pick one by its id rather than reformulating.
+</scope_and_defaults>
+
+<state_caveats>
+For dead-code and cross-repo impact, state the completeness caveat: dynamic
+dispatch, DI, reflection, cross-language calls, and un-indexed projects can
+hide real users. graphlens also leaves some calls unresolved — `*_unresolved`
+in a relations result counts them.
+</state_caveats>
+"""
