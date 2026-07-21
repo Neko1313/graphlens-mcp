@@ -1,10 +1,12 @@
 from mcp.server import MCPServer
 
-from features.search.adapter import add, greeting, summarize
+from features.search.adapter import search
 
 
 def register(mcp: MCPServer) -> None:
-    """Register MCPServer."""
-    mcp.tool()(add)
-    mcp.resource("greeting://{name}")(greeting)
-    mcp.prompt()(summarize)
+    """Register the search feature: the semantic/name search tool.
+
+    ``structured_output=False`` — the tool returns content blocks
+    (ResourceLinks / text), not a JSON object to schematize.
+    """
+    mcp.tool(structured_output=False)(search)
