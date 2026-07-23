@@ -15,9 +15,12 @@ tasks:
     silent: true
 
   install:
-    desc: Sync the virtualenv with all dependency groups
+    desc: Sync the virtualenv with all dependency groups and extras
     cmds:
-      - uv sync --all-groups
+      # --all-extras: the neo4j backend module imports the `neo4j` package
+      # unconditionally at module level, so lint/typecheck/tests need it
+      # installed even when nobody's exercising the Neo4j backend itself.
+      - uv sync --all-groups --all-extras
 
   lint:
     desc: Lint with ruff (curated ruleset in ruff.toml)
