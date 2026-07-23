@@ -7,6 +7,21 @@ __all__ = ["is_file", "read_file", "read_span"]
 _MAX_FILE_BYTES = 5_000_000
 
 
+def _resolve_within(root: Path, file_path: str) -> Path | None:
+    """Resolve ``file_path`` under ``root``, refusing any escape.
+
+    ``root / file_path`` treats an absolute ``file_path`` as a full override
+    (``Path("/a") / "/etc/passwd" == Path("/etc/passwd")``) and does nothing
+    to stop ``../`` traversal, so a caller-controlled path must be checked
+    against the resolved root before it ever reaches the filesystem.
+    """
+    candidate = (root / file_path).resolve()
+    root_resolved = root.resolve()
+    if not candidate.is_relative_to(root_resolved):
+        return None
+    return candidate
+
+
 def _read_sync(path: Path) -> str | None:
     try:
         if path.stat().st_size > _MAX_FILE_BYTES:
@@ -18,14 +33,20 @@ def _read_sync(path: Path) -> str | None:
 
 async def is_file(root: Path, file_path: str) -> bool:
     """Whether a project file exists (path is root-relative)."""
-    return await asyncio.to_thread((root / file_path).is_file)
+    resolved = _resolve_within(root, file_path)
+    if resolved is None:
+        return False
+    return await asyncio.to_thread(resolved.is_file)
 
 
 async def read_file(root: Path, file_path: str) -> str | None:
     """Read a project file off the event loop, capped at a few MB. None if
-    unreadable or too large.
+    unreadable, too large, or outside ``root``.
     """
-    return await asyncio.to_thread(_read_sync, root / file_path)
+    resolved = _resolve_within(root, file_path)
+    if resolved is None:
+        return None
+    return await asyncio.to_thread(_read_sync, resolved)
 
 
 async def read_span(

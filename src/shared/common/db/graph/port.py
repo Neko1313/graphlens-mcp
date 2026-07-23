@@ -1,7 +1,16 @@
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Protocol
 
-__all__ = ["GraphExecutor", "GraphStore"]
+__all__ = ["GraphExecutor", "GraphStore", "GraphStoreError"]
+
+
+class GraphStoreError(Exception):
+    """A Cypher query failed — wraps the backend-native driver exception.
+
+    Callers written against ``GraphExecutor``/``GraphStore`` catch this one
+    type regardless of which backend (Kuzu or Neo4j) is behind the port,
+    instead of importing driver-specific exception hierarchies.
+    """
 
 
 class GraphExecutor(Protocol):
