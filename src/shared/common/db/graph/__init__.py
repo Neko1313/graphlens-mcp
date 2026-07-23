@@ -2,11 +2,12 @@ from functools import cache
 from urllib.parse import urlsplit
 
 from shared.common.db.graph.kuzu import KuzuGraphStore
-from shared.common.db.graph.port import GraphStore
+from shared.common.db.graph.port import GraphExecutor, GraphStore
 from shared.common.setting.getter_setting import get_graph_db
 from shared.common.setting.type import GraphDBHost
 
 __all__ = [
+    "GraphExecutor",
     "GraphStore",
     "get_graph_store",
 ]

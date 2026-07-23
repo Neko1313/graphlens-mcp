@@ -7,7 +7,7 @@ from pathlib import Path
 
 from graphlens import Node, Relation
 
-from shared.common.db.graph import GraphStore
+from shared.common.db.graph import GraphExecutor, GraphStore
 
 __all__ = [
     "clear_project",
@@ -158,7 +158,7 @@ def _meta_json(metadata: dict[str, object]) -> str:
     return json.dumps(metadata, default=str)
 
 
-async def ensure_code_schema(store: GraphStore) -> None:
+async def ensure_code_schema(store: GraphExecutor) -> None:
     await store.execute(
         "CREATE NODE TABLE IF NOT EXISTS CodeNode("
         "id STRING, project_id STRING, local_id STRING, kind STRING, "
@@ -178,25 +178,27 @@ async def ensure_code_schema(store: GraphStore) -> None:
 
 
 async def clear_project(store: GraphStore, project_id: str) -> None:
-    """Drop a project's recorded graph head, then its nodes and edges.
+    """Drop a project's recorded graph head, its nodes, and its edges.
 
-    Head first: these are separate autocommits, so a crash between them must
-    leave nodes-without-a-head (graph_head() is None -> remote_head declines
-    the no-op and the next index self-heals), never a head pointing at deleted
-    nodes (which would falsely report AlreadyCurrent for an empty project).
+    One transaction, so a crash can't leave a head pointing at deleted nodes
+    (which would falsely report AlreadyCurrent for an empty project). The head
+    still goes first, which keeps the failure benign on any store that can't
+    honour the transaction: nodes-without-a-head make ``graph_head()`` None, so
+    ``remote_head`` declines the no-op and the next index self-heals.
     """
-    await store.execute(
-        "MATCH (h:GraphHead {project_id: $pid}) DELETE h",
-        {"pid": project_id},
-    )
-    await store.execute(
-        "MATCH (n:CodeNode {project_id: $pid}) DETACH DELETE n",
-        {"pid": project_id},
-    )
+    async with store.transaction() as tx:
+        await tx.execute(
+            "MATCH (h:GraphHead {project_id: $pid}) DELETE h",
+            {"pid": project_id},
+        )
+        await tx.execute(
+            "MATCH (n:CodeNode {project_id: $pid}) DETACH DELETE n",
+            {"pid": project_id},
+        )
 
 
 async def set_graph_head(
-    store: GraphStore,
+    store: GraphExecutor,
     project_id: str,
     sha: str,
 ) -> None:
@@ -207,7 +209,7 @@ async def set_graph_head(
     )
 
 
-async def graph_head(store: GraphStore, project_id: str) -> str | None:
+async def graph_head(store: GraphExecutor, project_id: str) -> str | None:
     """The sha the project's graph currently reflects, or ``None``.
 
     The no-op fast path compares against THIS (not "any ref ever indexed"),
@@ -222,7 +224,7 @@ async def graph_head(store: GraphStore, project_id: str) -> str | None:
     return rows[0]["sha"] if rows else None
 
 
-async def clear_relations(store: GraphStore, project_id: str) -> None:
+async def clear_relations(store: GraphExecutor, project_id: str) -> None:
     """Delete a project's edges (keeping its nodes) — for a full edge replace.
 
     Edges are intra-project, so matching those out of any project node covers
@@ -236,7 +238,7 @@ async def clear_relations(store: GraphStore, project_id: str) -> None:
 
 
 async def stored_node_hashes(
-    store: GraphStore,
+    store: GraphExecutor,
     project_id: str,
 ) -> dict[str, str]:
     """The stored ``{local_id: content_hash}`` map — the diff baseline."""
@@ -249,7 +251,7 @@ async def stored_node_hashes(
 
 
 async def delete_nodes(
-    store: GraphStore,
+    store: GraphExecutor,
     project_id: str,
     local_ids: Iterable[str],
 ) -> None:
@@ -277,7 +279,7 @@ def vector_ids_filter(gids: list[str]) -> str:
 
 
 async def persist_nodes(
-    store: GraphStore,
+    store: GraphExecutor,
     root: Path,
     project_id: str,
     nodes: Iterable[Node],
@@ -310,7 +312,7 @@ async def persist_nodes(
 
 
 async def persist_relations(
-    store: GraphStore,
+    store: GraphExecutor,
     project_id: str,
     relations: Iterable[Relation],
     valid_ids: set[str],

@@ -6,7 +6,7 @@ from typing import Any
 from graphlens import Node
 
 from entities.commit import CommitInfo
-from shared.common.db.graph import GraphStore
+from shared.common.db.graph import GraphExecutor, GraphStore
 from shared.common.indexing.persist import content_hash, norm_path
 
 __all__ = [
@@ -37,7 +37,7 @@ def _span_repr(node: Node) -> str:
     return f"{span.start_line},{span.start_col},{span.end_line},{span.end_col}"
 
 
-async def ensure_temporal_schema(store: GraphStore) -> None:
+async def ensure_temporal_schema(store: GraphExecutor) -> None:
     """Create the append-only version log and per-ref head tables."""
     await store.execute(
         "CREATE NODE TABLE IF NOT EXISTS NodeVersion("
@@ -64,21 +64,23 @@ async def ensure_temporal_schema(store: GraphStore) -> None:
 
 
 async def clear_project(store: GraphStore, project_id: str) -> None:
-    """Drop a project's version history, per-ref heads, and commit map."""
+    """Drop a project's version history, per-ref heads, and commit map.
+
+    One transaction: a half-cleared log — say heads gone but versions kept —
+    would let the next index restart the seq counter over rows that already
+    exist at those seqs.
+    """
     await ensure_temporal_schema(store)
-    await store.execute(
-        "MATCH (v:NodeVersion {project_id: $p}) DELETE v", {"p": project_id},
-    )
-    await store.execute(
-        "MATCH (s:RefState {project_id: $p}) DELETE s", {"p": project_id},
-    )
-    await store.execute(
-        "MATCH (c:RefCommit {project_id: $p}) DELETE c", {"p": project_id},
-    )
+    async with store.transaction() as tx:
+        for label in ("NodeVersion", "RefState", "RefCommit"):
+            await tx.execute(
+                f"MATCH (v:{label} {{project_id: $p}}) DELETE v",
+                {"p": project_id},
+            )
 
 
 async def state_at(
-    store: GraphStore,
+    store: GraphExecutor,
     project_id: str,
     ref: str,
     at_seq: int,
@@ -140,7 +142,7 @@ def _row(
 
 
 async def _ref_state(
-    store: GraphStore,
+    store: GraphExecutor,
     project_id: str,
     ref: str,
 ) -> tuple[str | None, int]:
@@ -156,7 +158,7 @@ async def _ref_state(
 
 
 async def _commit_seq(
-    store: GraphStore,
+    store: GraphExecutor,
     project_id: str,
     ref: str,
     sha: str,
@@ -167,6 +169,87 @@ async def _commit_seq(
         {"id": f"{project_id}::{ref}::{sha}"},
     )
     return int(rows[0]["seq"]) if rows else None
+
+
+def _node_rows(
+    root: Path,
+    project_id: str,
+    commit: CommitInfo,
+    seq: int,
+    prev: dict[str, str],
+    nodes: dict[str, Node],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Diff the incoming node set against ``prev`` into version rows."""
+    counts = {"created": 0, "updated": 0, "deleted": 0, "unchanged": 0}
+    rows: list[dict[str, Any]] = []
+    for node_id, node in nodes.items():
+        digest = content_hash(root, node)
+        if node_id not in prev:
+            status = "create"
+            counts["created"] += 1
+        elif prev[node_id] != digest:
+            status = "update"
+            counts["updated"] += 1
+        else:
+            counts["unchanged"] += 1
+            continue
+        rows.append(_row(project_id, commit, seq, node_id, status, node, root))
+    for node_id in prev.keys() - nodes.keys():
+        counts["deleted"] += 1
+        rows.append(
+            _row(project_id, commit, seq, node_id, _DELETE, None, root),
+        )
+    return rows, counts
+
+
+async def _write_node_versions(
+    tx: GraphExecutor,
+    project_id: str,
+    ref: str,
+    seq: int,
+    rows: list[dict[str, Any]],
+) -> None:
+    # Clearing the slot first is belt-and-braces: within this transaction it
+    # is a no-op, but it also sweeps rows stranded at this seq by a store
+    # written before the append became transactional.
+    await tx.execute(
+        "MATCH (v:NodeVersion {project_id: $p, ref: $ref, seq: $seq}) "
+        "DELETE v",
+        {"p": project_id, "ref": ref, "seq": seq},
+    )
+    for chunk in _chunks(rows, _BATCH):
+        await tx.execute(
+            "UNWIND $rows AS r MERGE (v:NodeVersion {id: r.id}) "
+            "SET v.project_id = r.project_id, v.ref = r.ref, "
+            "v.node_id = r.node_id, v.seq = r.seq, "
+            "v.time_update = r.time_update, v.status = r.status, "
+            "v.content_hash = r.content_hash, v.qualified_name = r.qn, "
+            "v.name = r.name, v.kind = r.kind, v.file_path = r.fp, "
+            "v.span = r.span, v.metadata = r.meta",
+            {"rows": chunk},
+        )
+
+
+async def _advance_head(
+    tx: GraphExecutor,
+    project_id: str,
+    commit: CommitInfo,
+    seq: int,
+) -> None:
+    params = {
+        "p": project_id, "ref": commit.ref, "sha": commit.sha, "seq": seq,
+    }
+    await tx.execute(
+        "MERGE (c:RefCommit {id: $id}) "
+        "SET c.project_id = $p, c.ref = $ref, c.sha = $sha, c.seq = $seq",
+        {"id": f"{project_id}::{commit.ref}::{commit.sha}", **params},
+    )
+    await tx.execute(
+        "MERGE (s:RefState {id: $id}) "
+        "SET s.project_id = $p, s.ref = $ref, s.head_sha = $sha, "
+        "s.head_seq = $seq",
+        {"id": f"{project_id}::{commit.ref}", **params},
+    )
 
 
 async def append_versions(
@@ -186,6 +269,11 @@ async def append_versions(
     ``create``, content-changed (by ``content_hash``) are ``update``, vanished
     nodes get a ``delete`` tombstone, unchanged nodes are skipped. Returns the
     change counts plus the ``seq`` this commit landed at.
+
+    The whole append — the baseline read, the version rows, and the two head
+    records — runs in ONE transaction. Partially applied, it would be worse
+    than not applied at all: rows at a seq whose head never advanced are
+    invisible to every read yet block the next commit from using that seq.
     """
     ref = commit.ref
     existing = await _commit_seq(store, project_id, ref, commit.sha)
@@ -196,74 +284,18 @@ async def append_versions(
             "unchanged": len(live), "seq": existing,
         }
 
-    _head_sha, head_seq = await _ref_state(store, project_id, ref)
-    seq = head_seq + 1
-    prev_rows = await state_at(store, project_id, ref, head_seq)
-    prev = {row["node_id"]: row["content_hash"] for row in prev_rows}
+    async with store.transaction() as tx:
+        _head_sha, head_seq = await _ref_state(tx, project_id, ref)
+        seq = head_seq + 1
+        prev_rows = await state_at(tx, project_id, ref, head_seq)
+        prev = {row["node_id"]: row["content_hash"] for row in prev_rows}
 
-    new_nodes = {node.id: node for node in nodes}
-    counts = {"created": 0, "updated": 0, "deleted": 0, "unchanged": 0}
-    rows: list[dict[str, Any]] = []
-
-    for node_id, node in new_nodes.items():
-        digest = content_hash(root, node)
-        if node_id not in prev:
-            status = "create"
-            counts["created"] += 1
-        elif prev[node_id] != digest:
-            status = "update"
-            counts["updated"] += 1
-        else:
-            counts["unchanged"] += 1
-            continue
-        rows.append(
-            _row(project_id, commit, seq, node_id, status, node, root),
+        rows, counts = _node_rows(
+            root, project_id, commit, seq, prev,
+            {node.id: node for node in nodes},
         )
+        await _write_node_versions(tx, project_id, ref, seq, rows)
+        await _advance_head(tx, project_id, commit, seq)
 
-    for node_id in prev.keys() - new_nodes.keys():
-        counts["deleted"] += 1
-        rows.append(
-            _row(project_id, commit, seq, node_id, _DELETE, None, root),
-        )
-
-    # The append isn't transactional across NodeVersion/RefCommit/RefState, so
-    # a prior aborted run can strand rows at this (fresh) seq. Clear the slot
-    # first — for a new commit it must be empty — so those orphans can't
-    # survive to corrupt state_at.
-    await store.execute(
-        "MATCH (v:NodeVersion {project_id: $p, ref: $ref, seq: $seq}) "
-        "DELETE v",
-        {"p": project_id, "ref": ref, "seq": seq},
-    )
-
-    for chunk in _chunks(rows, _BATCH):
-        await store.execute(
-            "UNWIND $rows AS r MERGE (v:NodeVersion {id: r.id}) "
-            "SET v.project_id = r.project_id, v.ref = r.ref, "
-            "v.node_id = r.node_id, v.seq = r.seq, "
-            "v.time_update = r.time_update, v.status = r.status, "
-            "v.content_hash = r.content_hash, v.qualified_name = r.qn, "
-            "v.name = r.name, v.kind = r.kind, v.file_path = r.fp, "
-            "v.span = r.span, v.metadata = r.meta",
-            {"rows": chunk},
-        )
-
-    await store.execute(
-        "MERGE (c:RefCommit {id: $id}) "
-        "SET c.project_id = $p, c.ref = $ref, c.sha = $sha, c.seq = $seq",
-        {
-            "id": f"{project_id}::{ref}::{commit.sha}",
-            "p": project_id, "ref": ref, "sha": commit.sha, "seq": seq,
-        },
-    )
-    await store.execute(
-        "MERGE (s:RefState {id: $id}) "
-        "SET s.project_id = $p, s.ref = $ref, s.head_sha = $sha, "
-        "s.head_seq = $seq",
-        {
-            "id": f"{project_id}::{ref}",
-            "p": project_id, "ref": ref, "sha": commit.sha, "seq": seq,
-        },
-    )
     counts["seq"] = seq
     return counts
