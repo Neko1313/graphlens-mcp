@@ -324,7 +324,8 @@ def retain_checkout(dest: Path, project_id: str) -> Path:
 def remove_retained(project_id: str) -> None:
     """Delete a project's retained working tree (on project removal)."""
     shutil.rmtree(
-        _CHECKOUT_ROOT / f"{_RETAINED_PREFIX}{project_id}", ignore_errors=True,
+        _CHECKOUT_ROOT / f"{_RETAINED_PREFIX}{project_id}",
+        ignore_errors=True,
     )
 
 

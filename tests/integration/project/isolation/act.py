@@ -33,14 +33,18 @@ async def _seed_chain(store, root, project_id):
     relations = [_rel("a", "b"), _rel("b", "c")]
     await persist.persist_nodes(store, root, project_id, nodes)
     await persist.persist_relations(
-        store, project_id, relations, {"a", "b", "c"},
+        store,
+        project_id,
+        relations,
+        {"a", "b", "c"},
     )
 
 
 @pytest.mark.integration
 @pytest.mark.isolation
 async def test_multihop_traversal_never_crosses_into_another_project(
-    graph_store, tmp_path,
+    graph_store,
+    tmp_path,
 ):
     # Arrange — two projects sharing identical local ids and edge shape.
     await _seed_chain(graph_store, tmp_path, "proja_11111111")

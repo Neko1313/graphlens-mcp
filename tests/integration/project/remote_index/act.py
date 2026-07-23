@@ -12,7 +12,10 @@ def _isolated_checkout_root(tmp_path, monkeypatch):
 @pytest.mark.integration
 @pytest.mark.project
 async def test_index_remote_retains_a_readable_checkout(
-    graph_store, vector_store, registry, git_repo,
+    graph_store,
+    vector_store,
+    registry,
+    git_repo,
 ):
     # Regression (final review): index_remote used to delete the checkout it
     # registered as project.path, breaking every disk-backed read in server
@@ -22,7 +25,10 @@ async def test_index_remote_retains_a_readable_checkout(
 
     # Act
     project, result = await service.index_remote(
-        str(git_repo), "main", None, app,
+        str(git_repo),
+        "main",
+        None,
+        app,
     )
 
     # Assert — the working tree the project points at still exists on disk.

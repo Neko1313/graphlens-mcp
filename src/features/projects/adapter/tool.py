@@ -140,7 +140,10 @@ async def index(
 
     if params.repo_url is not None:
         current = await service.remote_head(
-            params.repo_url, params.ref, token, app.graph_store,
+            params.repo_url,
+            params.ref,
+            token,
+            app.graph_store,
         )
         if current is not None:
             project_id, ref, sha = current
@@ -151,12 +154,19 @@ async def index(
             if registered is not None:
                 return AlreadyCurrent(project=project_id, ref=ref, sha=sha)
         project, result = await service.index_remote(
-            params.repo_url, params.ref, token, app, on_progress,
+            params.repo_url,
+            params.ref,
+            token,
+            app,
+            on_progress,
         )
     else:
         root = await asyncio.to_thread(_validated_root, params.directory or "")
         project = await asyncio.to_thread(
-            service.build_project, root, params.name, params.description,
+            service.build_project,
+            root,
+            params.name,
+            params.description,
         )
         confirmed = await _confirm_local(ctx, project, root)
         if not isinstance(confirmed, Project):
@@ -225,7 +235,10 @@ async def remove_project(
             return Cancelled()
 
     await service.remove_project(
-        app.graph_store, app.vector_store, app.registry, params.project,
+        app.graph_store,
+        app.vector_store,
+        app.registry,
+        params.project,
     )
     unregister_project_resource(ctx.mcp_server, params.project)
     await notify_resources_changed(ctx)

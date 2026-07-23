@@ -83,8 +83,11 @@ def _run_ripgrep(root: Path, query: str) -> list[tuple[str, int, str]]:
         cmd = [exe, "-rnIF", "--", query, str(root)]
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=_RG_TIMEOUT_S, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_RG_TIMEOUT_S,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -139,17 +142,24 @@ async def _content_hits(
             if enclosing is not None:
                 hits.append(
                     SearchHit(
-                        id=enclosing["id"], name=enclosing["name"],
-                        kind=enclosing["kind"], file_path=file_path,
-                        match="content", line=lineno,
+                        id=enclosing["id"],
+                        name=enclosing["name"],
+                        kind=enclosing["kind"],
+                        file_path=file_path,
+                        match="content",
+                        line=lineno,
                         uri=_node_uri(project_id, enclosing["id"]),
                     ),
                 )
             else:
                 hits.append(
                     SearchHit(
-                        id="", name=file_path, kind="file",
-                        file_path=file_path, match="content", line=lineno,
+                        id="",
+                        name=file_path,
+                        kind="file",
+                        file_path=file_path,
+                        match="content",
+                        line=lineno,
                         uri=_file_uri(project_id, file_path),
                     ),
                 )
@@ -177,7 +187,9 @@ async def _signatures(
     out: dict[str, str] = {}
     for row in rows:
         _, signature = await source.read_span(
-            project.path, row["fp"], row["span"],
+            project.path,
+            row["fp"],
+            row["span"],
         )
         out[row["id"]] = signature
     return out
@@ -222,7 +234,8 @@ async def search(  # noqa: PLR0913, PLR0912 - query tool knobs + blend passes
     need_postfilter = bool(path_glob) and glob_filter is None
     over_fetch = limit * 10 if need_postfilter else limit
     raw = await vector_store.search(
-        CODE_COLLECTION, encode([query])[0].tolist(),
+        CODE_COLLECTION,
+        encode([query])[0].tolist(),
         limit=max(over_fetch, limit),
         filter_expr=filter_expr,
         output_fields=["name", "kind", "file_path", "local_id"],
@@ -240,10 +253,13 @@ async def search(  # noqa: PLR0913, PLR0912 - query tool knobs + blend passes
         seen.add(node_id)
         hits.append(
             SearchHit(
-                id=node_id, name=entity.get("name") or "",
-                kind=entity.get("kind") or "", file_path=file_path,
+                id=node_id,
+                name=entity.get("name") or "",
+                kind=entity.get("kind") or "",
+                file_path=file_path,
                 score=round(float(hit.get("distance", 0.0)), 4),
-                match="semantic", uri=_node_uri(project_id, node_id),
+                match="semantic",
+                uri=_node_uri(project_id, node_id),
             ),
         )
         if len(hits) >= limit:
@@ -265,8 +281,11 @@ async def search(  # noqa: PLR0913, PLR0912 - query tool knobs + blend passes
             seen.add(node_id)
             hits.append(
                 SearchHit(
-                    id=node_id, name=row["name"], kind=row["kind"],
-                    file_path=file_path, match="name",
+                    id=node_id,
+                    name=row["name"],
+                    kind=row["kind"],
+                    file_path=file_path,
+                    match="name",
                     uri=_node_uri(project_id, node_id),
                 ),
             )
@@ -275,7 +294,12 @@ async def search(  # noqa: PLR0913, PLR0912 - query tool knobs + blend passes
 
     if len(hits) < limit and root is not None:
         for hit in await _content_hits(
-            graph_store, root, project_id, query, path_glob, limit - len(hits),
+            graph_store,
+            root,
+            project_id,
+            query,
+            path_glob,
+            limit - len(hits),
         ):
             key = hit.id or f"{hit.file_path}:{hit.line}"
             if key in seen:
@@ -318,11 +342,16 @@ async def _finalize_hits(
     resource link — those are filtered out before signatures are read.
     """
     live = await _existing_local_ids(
-        graph_store, project_id, [h.id for h in hits if h.id],
+        graph_store,
+        project_id,
+        [h.id for h in hits if h.id],
     )
     kept = [h for h in hits if not h.id or h.id in live]
     signatures = await _signatures(
-        graph_store, registry, project_id, [h.id for h in kept if h.id],
+        graph_store,
+        registry,
+        project_id,
+        [h.id for h in kept if h.id],
     )
     for hit in kept:
         hit.signature = signatures.get(hit.id, "")
@@ -347,5 +376,7 @@ async def get_node_source(
     if project is None:
         return "", ""
     return await source.read_span(
-        project.path, rows[0]["file_path"], rows[0]["span"],
+        project.path,
+        rows[0]["file_path"],
+        rows[0]["span"],
     )

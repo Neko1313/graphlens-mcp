@@ -24,20 +24,21 @@ from shared.common.setting.util import create_dir
 def get_setting_db() -> DBSettings:
     return DBSettings()
 
+
 @cache
 def get_app_dir() -> Unix | MacOS | Windows:
-    return PlatformDirs(
-        APP_NAME,
-        metadata("graphlens-mcp")["Author"]
-    )
+    return PlatformDirs(APP_NAME, metadata("graphlens-mcp")["Author"])
+
 
 @cache
 def get_app_dir_data() -> Path:
     return create_dir(get_app_dir().user_data_dir)
 
+
 @cache
 def get_registry_db_path() -> Path:
     return get_app_dir_data().joinpath("registry.db")
+
 
 @cache
 def get_graph_db() -> GraphDB:
@@ -51,6 +52,7 @@ def get_graph_db() -> GraphDB:
     return GraphDBHost(
         dsn=db_settings.graph,
     )
+
 
 @cache
 def get_vector_db() -> VectorDB:

@@ -27,12 +27,19 @@ async def info(params: InfoParams) -> InfoResult:
 
     if params.ref or params.at:
         point = await resolve_point(
-            graph_store, project_id, params.ref, params.at,
+            graph_store,
+            project_id,
+            params.ref,
+            params.at,
         )
         if point is None:
             return NotFound(target=f"{params.ref or 'HEAD'}@{params.at}")
         historical = await service.info_at(
-            graph_store, project_id, point, params.target, params.file,
+            graph_store,
+            project_id,
+            point,
+            params.target,
+            params.file,
         )
         if historical is not None:
             return historical

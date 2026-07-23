@@ -37,14 +37,20 @@ async def history(graph_store):
     """Two commits: seq 1 has a→b, seq 2 replaces b with c and drops a→b."""
     await temporal.ensure_temporal_schema(graph_store)
     await temporal.append_versions(
-        graph_store, ".", PROJECT,
+        graph_store,
+        ".",
+        PROJECT,
         CommitInfo(ref="main", sha=SHA_ONE, time_update=111),
-        [_node("a", "alpha"), _node("b", "beta")], [_rel("a", "b")],
+        [_node("a", "alpha"), _node("b", "beta")],
+        [_rel("a", "b")],
     )
     await temporal.append_versions(
-        graph_store, ".", PROJECT,
+        graph_store,
+        ".",
+        PROJECT,
         CommitInfo(ref="main", sha=SHA_TWO, time_update=222),
-        [_node("a", "alpha"), _node("c", "gamma")], [_rel("a", "c")],
+        [_node("a", "alpha"), _node("c", "gamma")],
+        [_rel("a", "c")],
     )
     return graph_store
 
@@ -86,10 +92,16 @@ async def test_relations_report_the_neighbours_of_that_commit(history):
 
     # Act
     then = await relations_service.get_relations_at(
-        history, PROJECT, old, "a",
+        history,
+        PROJECT,
+        old,
+        "a",
     )
     now = await relations_service.get_relations_at(
-        history, PROJECT, new, "a",
+        history,
+        PROJECT,
+        new,
+        "a",
     )
 
     # Assert — the call that was replaced is still there in the past.

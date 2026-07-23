@@ -44,7 +44,9 @@ async def _history(project_id: str) -> list[dict[str, object]]:
             "head_sha": ref["head_sha"],
             "head_seq": ref["head_seq"],
             "commits": await temporal.list_commits(
-                graph_store, project_id, str(ref["ref"]),
+                graph_store,
+                project_id,
+                str(ref["ref"]),
             ),
         }
         for ref in refs

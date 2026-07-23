@@ -149,7 +149,10 @@ async def state_at(
     needs: resolving a frontier costs one query, not a whole-project scan.
     """
     params: dict[str, Any] = {
-        "p": project_id, "ref": ref, "at": at_seq, "deleted": _DELETE,
+        "p": project_id,
+        "ref": ref,
+        "at": at_seq,
+        "deleted": _DELETE,
     }
     if node_ids is None:
         return await _state_query(store, params, "")
@@ -221,8 +224,11 @@ async def edges_at(
     """
     side = "source_id" if direction == "out" else "target_id"
     params: dict[str, Any] = {
-        "p": project_id, "ref": ref, "at": at_seq,
-        "deleted": _DELETE, "kind": kind,
+        "p": project_id,
+        "ref": ref,
+        "at": at_seq,
+        "deleted": _DELETE,
+        "kind": kind,
     }
     rows: list[dict[str, Any]] = []
     for chunk in _id_chunks(node_ids):
@@ -597,7 +603,10 @@ async def _advance_head(
     seq: int,
 ) -> None:
     params = {
-        "p": project_id, "ref": commit.ref, "sha": commit.sha, "seq": seq,
+        "p": project_id,
+        "ref": commit.ref,
+        "sha": commit.sha,
+        "seq": seq,
     }
     await tx.execute(
         "MERGE (c:RefCommit {id: $id}) "
@@ -650,8 +659,11 @@ async def append_versions(
     if existing is not None:
         live = await state_at(store, project_id, ref, existing)
         return {
-            "created": 0, "updated": 0, "deleted": 0,
-            "unchanged": len(live), "seq": existing,
+            "created": 0,
+            "updated": 0,
+            "deleted": 0,
+            "unchanged": len(live),
+            "seq": existing,
         }
 
     async with store.transaction() as tx:
@@ -662,13 +674,21 @@ async def append_versions(
         by_id = {node.id: node for node in nodes}
 
         rows, counts = _node_rows(
-            root, project_id, commit, seq, prev, by_id,
+            root,
+            project_id,
+            commit,
+            seq,
+            prev,
+            by_id,
         )
         await _write_node_versions(tx, project_id, ref, seq, rows)
 
         prev_edges = await _live_edges(tx, project_id, ref, head_seq)
         edge_rows, edge_counts = _rel_rows(
-            project_id, commit, seq, prev_edges,
+            project_id,
+            commit,
+            seq,
+            prev_edges,
             _edge_map(relations, set(by_id)),
         )
         await _write_rel_versions(tx, project_id, ref, seq, edge_rows)

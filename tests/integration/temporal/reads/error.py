@@ -23,15 +23,24 @@ async def test_an_unknown_ref_or_commit_resolves_to_nothing(graph_store):
     # Arrange
     await temporal.ensure_temporal_schema(graph_store)
     await temporal.append_versions(
-        graph_store, ".", PROJECT,
-        CommitInfo(ref="main", sha="a" * 40, time_update=1), [],
+        graph_store,
+        ".",
+        PROJECT,
+        CommitInfo(ref="main", sha="a" * 40, time_update=1),
+        [],
     )
 
     # Act / Assert — a ref never indexed, and a sha never seen.
     assert await temporal.resolve_point(graph_store, PROJECT, "nope") is None
-    assert await temporal.resolve_point(
-        graph_store, PROJECT, "main", "deadbeef",
-    ) is None
+    assert (
+        await temporal.resolve_point(
+            graph_store,
+            PROJECT,
+            "main",
+            "deadbeef",
+        )
+        is None
+    )
 
 
 @pytest.mark.integration
@@ -43,13 +52,19 @@ async def test_an_all_digit_sha_prefix_falls_back_to_the_sha(graph_store):
     await temporal.ensure_temporal_schema(graph_store)
     sha = "9" * 40
     await temporal.append_versions(
-        graph_store, ".", PROJECT,
-        CommitInfo(ref="digits", sha=sha, time_update=1), [],
+        graph_store,
+        ".",
+        PROJECT,
+        CommitInfo(ref="digits", sha=sha, time_update=1),
+        [],
     )
 
     # Act — "999999" is no seq, so it must resolve as a sha prefix.
     point = await temporal.resolve_point(
-        graph_store, PROJECT, "digits", "999999",
+        graph_store,
+        PROJECT,
+        "digits",
+        "999999",
     )
 
     # Assert
@@ -66,8 +81,11 @@ async def test_an_ambiguous_sha_prefix_resolves_to_nothing(graph_store):
     await temporal.ensure_temporal_schema(graph_store)
     for sha in ("abc111", "abc222"):
         await temporal.append_versions(
-            graph_store, ".", PROJECT,
-            CommitInfo(ref="dup", sha=sha, time_update=1), [],
+            graph_store,
+            ".",
+            PROJECT,
+            CommitInfo(ref="dup", sha=sha, time_update=1),
+            [],
         )
 
     # Act

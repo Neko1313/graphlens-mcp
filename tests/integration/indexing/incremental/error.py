@@ -52,7 +52,9 @@ def _project(tmp_path):
 @pytest.mark.integration
 @pytest.mark.indexing
 async def test_a_failed_vector_write_self_heals_on_retry(
-    tmp_path, graph_store, vector_store,
+    tmp_path,
+    graph_store,
+    vector_store,
 ):
     # Regression (P03 review): vectors are written before the graph
     # content_hash, so a failed embed-store leaves the diff baseline stale and

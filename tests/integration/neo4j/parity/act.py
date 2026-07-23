@@ -42,11 +42,16 @@ async def test_neo4j_runs_the_real_persist_and_query_surface(neo4j_store):
     # Arrange — real DDL (a no-op on Neo4j) + the real persist helpers.
     await persist.ensure_code_schema(store)
     await persist.persist_nodes(
-        store, ROOT, PROJECT,
+        store,
+        ROOT,
+        PROJECT,
         [_node("a", "foo"), _node("b", "bar"), _node("c", "baz")],
     )
     await persist.persist_relations(
-        store, PROJECT, [_rel("a", "b"), _rel("b", "c")], {"a", "b", "c"},
+        store,
+        PROJECT,
+        [_rel("a", "b"), _rel("b", "c")],
+        {"a", "b", "c"},
     )
 
     # Act / Assert — name search (toLower + CONTAINS).
@@ -71,13 +76,20 @@ async def test_neo4j_runs_the_real_persist_and_query_surface(neo4j_store):
     # the real temporal log on Neo4j — including its explicit transaction,
     # the node/edge diffs, and both state_at and edges_at aggregations.
     await temporal.append_versions(
-        store, ROOT, PROJECT,
+        store,
+        ROOT,
+        PROJECT,
         CommitInfo(ref="main", sha="s1", time_update=1),
-        [_node("x", "x"), _node("y", "y")], [_rel("x", "y")],
+        [_node("x", "x"), _node("y", "y")],
+        [_rel("x", "y")],
     )
     await temporal.append_versions(
-        store, ROOT, PROJECT,
-        CommitInfo(ref="main", sha="s2", time_update=2), [], [],
+        store,
+        ROOT,
+        PROJECT,
+        CommitInfo(ref="main", sha="s2", time_update=2),
+        [],
+        [],
     )
     live_at_1 = {
         row["node_id"]
@@ -91,10 +103,22 @@ async def test_neo4j_runs_the_real_persist_and_query_surface(neo4j_store):
     assert live_at_2 == set()
 
     edges_at_1 = await temporal.edges_at(
-        store, PROJECT, "main", 1, ["x"], "out", "calls",
+        store,
+        PROJECT,
+        "main",
+        1,
+        ["x"],
+        "out",
+        "calls",
     )
     edges_at_2 = await temporal.edges_at(
-        store, PROJECT, "main", 2, ["x"], "out", "calls",
+        store,
+        PROJECT,
+        "main",
+        2,
+        ["x"],
+        "out",
+        "calls",
     )
     assert {row["target_id"] for row in edges_at_1} == {"y"}
     assert edges_at_2 == []

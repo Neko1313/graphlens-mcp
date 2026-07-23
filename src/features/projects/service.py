@@ -251,7 +251,8 @@ async def remove_project(
     await persist.clear_project(graph_store, project_id)
     await temporal.clear_project(graph_store, project_id)
     await vector_store.delete(
-        CODE_COLLECTION, persist.vector_project_filter(project_id),
+        CODE_COLLECTION,
+        persist.vector_project_filter(project_id),
     )
     await asyncio.to_thread(remove_retained, project_id)
     await registry.remove(project_id)

@@ -24,6 +24,7 @@ class Neo4jDsn(_BaseMultiHostUrl):
     def host(self) -> str | None:
         return (self.hosts() or [{}])[0].get("host")
 
+
 class MilvusDsn(AnyUrl):
     _constraints = UrlConstraints(
         host_required=True,
@@ -55,6 +56,7 @@ class VectorDBLocal(BaseModel):
 class VectorDBHost(BaseModel):
     type: Literal[DBType.HOST] = DBType.HOST
     dsn: MilvusDsn
+
 
 VectorDB = Annotated[
     VectorDBLocal | VectorDBHost,

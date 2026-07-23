@@ -12,7 +12,9 @@ PROJECT = "proj_phantom"
 @pytest.mark.integration
 @pytest.mark.search
 async def test_search_drops_a_vector_without_a_graph_node(
-    graph_store, vector_store: VectorStore, registry,
+    graph_store,
+    vector_store: VectorStore,
+    registry,
 ):
     # Regression (final review): a vector can outlive its graph node after a
     # crash between the vector write and the graph write; such an orphan must
@@ -37,7 +39,11 @@ async def test_search_drops_a_vector_without_a_graph_node(
 
     # Act
     hits = await search_service.search(
-        graph_store, vector_store, registry, "ghost", PROJECT,
+        graph_store,
+        vector_store,
+        registry,
+        "ghost",
+        PROJECT,
     )
 
     # Assert — the phantom is filtered out.

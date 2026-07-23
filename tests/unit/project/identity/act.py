@@ -83,7 +83,8 @@ def test_project_id_stays_filter_safe(remote):
 @pytest.mark.unit
 @pytest.mark.project
 def test_build_project_identity_ignores_the_checkout_path(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ):
     # Two clones of one repo at different on-disk paths are one project.
     # Arrange

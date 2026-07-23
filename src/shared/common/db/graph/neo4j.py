@@ -45,7 +45,8 @@ class _Neo4jTransaction:
         if translated is None:
             return []
         result = await self._transaction.run(
-            _text(translated), parameters or {},
+            _text(translated),
+            parameters or {},
         )
         return [dict(record) async for record in result]
 
@@ -85,7 +86,8 @@ class Neo4jGraphStore:
             return []
         async with self._driver.session() as session:
             result = await session.run(
-                Query(_text(translated)), parameters or {},
+                Query(_text(translated)),
+                parameters or {},
             )
             return [dict(record) async for record in result]
 

@@ -115,19 +115,27 @@ async def _assemble(
     wanted = _wanted_kinds(kinds)
     result = RelationsResult(node=node, depth=depth, kinds=sorted(wanted))
     if "calls" in wanted:
-        result.callees, result.callees_total, result.callees_unresolved = (
-            await fetch("out", "calls", depth)
-        )
+        (
+            result.callees,
+            result.callees_total,
+            result.callees_unresolved,
+        ) = await fetch("out", "calls", depth)
         result.callers, result.callers_total, _ = await fetch(
-            "in", "calls", depth,
+            "in",
+            "calls",
+            depth,
         )
     if "inherits_from" in wanted:
         result.implementors, result.implementors_total, _ = await fetch(
-            "in", "inherits_from", 1,
+            "in",
+            "inherits_from",
+            1,
         )
     if "references" in wanted:
         result.references, result.references_total, _ = await fetch(
-            "in", "references", 1,
+            "in",
+            "references",
+            1,
         )
     return result
 
@@ -155,7 +163,13 @@ async def get_relations(
 
     async def fetch(direction: str, kind: str, hops: int) -> Group:
         return await _group(
-            graph_store, project_id, node_id, direction, kind, hops, limit,
+            graph_store,
+            project_id,
+            node_id,
+            direction,
+            kind,
+            hops,
+            limit,
         )
 
     return await _assemble(node, depth, kinds, fetch)
@@ -199,8 +213,13 @@ async def _walk(
         if not frontier:
             break
         rows = await temporal.edges_at(
-            graph_store, project_id, point.ref, point.seq,
-            frontier, hop.direction, hop.kind,
+            graph_store,
+            project_id,
+            point.ref,
+            point.seq,
+            frontier,
+            hop.direction,
+            hop.kind,
         )
         next_hop = []
         for row in rows:
@@ -226,7 +245,11 @@ async def _group_at(
     if not reached:
         return [], 0, 0
     rows = await temporal.state_at(
-        graph_store, project_id, point.ref, point.seq, sorted(reached),
+        graph_store,
+        project_id,
+        point.ref,
+        point.seq,
+        sorted(reached),
     )
     resolved = [r for r in rows if r["kind"] != _UNRESOLVED_KIND]
     unresolved = len(rows) - len(resolved)
@@ -253,7 +276,11 @@ async def get_relations_at(
     there, and one added later is not.
     """
     rows = await temporal.state_at(
-        graph_store, project_id, point.ref, point.seq, [node_id],
+        graph_store,
+        project_id,
+        point.ref,
+        point.seq,
+        [node_id],
     )
     if not rows:
         return None
@@ -262,8 +289,12 @@ async def get_relations_at(
 
     async def fetch(direction: str, kind: str, hops: int) -> Group:
         return await _group_at(
-            graph_store, project_id, point, node_id,
-            _Hop(direction, kind, hops), limit,
+            graph_store,
+            project_id,
+            point,
+            node_id,
+            _Hop(direction, kind, hops),
+            limit,
         )
 
     result = await _assemble(_ref_from_row(rows[0]), depth, kinds, fetch)

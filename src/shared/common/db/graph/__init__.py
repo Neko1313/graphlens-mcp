@@ -36,7 +36,9 @@ def get_graph_store() -> GraphStore:
         port = parts.port or _NEO4J_DEFAULT_PORT
         uri = f"{parts.scheme}://{parts.hostname}:{port}"
         return Neo4jGraphStore.connect(
-            uri, parts.username or "neo4j", parts.password or "",
+            uri,
+            parts.username or "neo4j",
+            parts.password or "",
         )
 
     return KuzuGraphStore.open(graph_db.path)

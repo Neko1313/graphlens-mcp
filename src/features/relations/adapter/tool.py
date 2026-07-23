@@ -28,18 +28,28 @@ async def relations(params: RelationsParams) -> RelationsLookup:
     point = None
     if params.ref or params.at:
         point = await resolve_point(
-            graph_store, project_id, params.ref, params.at,
+            graph_store,
+            project_id,
+            params.ref,
+            params.at,
         )
         if point is None:
             return NotFound(target=f"{params.ref or 'HEAD'}@{params.at}")
 
     if point is None:
         node_id, candidates = await resolve_symbol(
-            graph_store, project_id, params.symbol, params.file,
+            graph_store,
+            project_id,
+            params.symbol,
+            params.file,
         )
     else:
         node_id, candidates = await resolve_symbol_at(
-            graph_store, project_id, point, params.symbol, params.file,
+            graph_store,
+            project_id,
+            point,
+            params.symbol,
+            params.file,
         )
     if node_id is None:
         if candidates:
@@ -50,12 +60,21 @@ async def relations(params: RelationsParams) -> RelationsLookup:
 
     if point is None:
         result = await service.get_relations(
-            graph_store, project_id, node_id, params.depth, params.limit,
+            graph_store,
+            project_id,
+            node_id,
+            params.depth,
+            params.limit,
             params.kinds,
         )
     else:
         result = await service.get_relations_at(
-            graph_store, project_id, point, node_id, params.depth,
-            params.limit, params.kinds,
+            graph_store,
+            project_id,
+            point,
+            node_id,
+            params.depth,
+            params.limit,
+            params.kinds,
         )
     return result if result is not None else NotFound(target=params.symbol)

@@ -103,7 +103,9 @@ async def get_node(
     project = await registry.get(project_id)
     if project is not None:
         src, signature = await source.read_span(
-            project.path, node["file_path"], node["span"],
+            project.path,
+            node["file_path"],
+            node["span"],
         )
     return NodeInfo(
         id=node["id"],
@@ -199,14 +201,25 @@ async def info(  # noqa: PLR0913 - info's optional lookup knobs
     if project is not None and await source.is_file(project.path, target):
         if mode == "source":
             return await get_file_source(
-                graph_store, registry, project_id, target, offset, limit,
+                graph_store,
+                registry,
+                project_id,
+                target,
+                offset,
+                limit,
             )
         return await get_file_outline(
-            graph_store, registry, project_id, target,
+            graph_store,
+            registry,
+            project_id,
+            target,
         )
 
     node_id, candidates = await resolve_symbol(
-        graph_store, project_id, target, file,
+        graph_store,
+        project_id,
+        target,
+        file,
     )
     if node_id is not None:
         return await get_node(graph_store, registry, project_id, node_id)
@@ -237,7 +250,10 @@ async def _outline_at(
 ) -> FileOutline | None:
     """A file's outline as recorded at ``point``, or None if it had none."""
     rows = await temporal.state_at(
-        graph_store, project_id, point.ref, point.seq,
+        graph_store,
+        project_id,
+        point.ref,
+        point.seq,
     )
     in_file = [row for row in rows if row["file_path"] == path]
     if not in_file:
@@ -277,7 +293,11 @@ async def info_at(
     revision, so a file always comes back as an outline.
     """
     rows = await temporal.state_at(
-        graph_store, project_id, point.ref, point.seq, [target],
+        graph_store,
+        project_id,
+        point.ref,
+        point.seq,
+        [target],
     )
     if rows:
         return _node_info_at(rows[0], point)
@@ -287,11 +307,19 @@ async def info_at(
         return outline
 
     node_id, candidates = await resolve_symbol_at(
-        graph_store, project_id, point, target, file,
+        graph_store,
+        project_id,
+        point,
+        target,
+        file,
     )
     if node_id is not None:
         found = await temporal.state_at(
-            graph_store, project_id, point.ref, point.seq, [node_id],
+            graph_store,
+            project_id,
+            point.ref,
+            point.seq,
+            [node_id],
         )
         return _node_info_at(found[0], point) if found else None
     if candidates:

@@ -8,8 +8,13 @@ from shared.common.indexing.temporal import content_hash
 ROOT = Path("/repo")
 
 
-def _node(qualified_name="mod.f", kind="function", file_path="m.py",
-          span=None, metadata=None):
+def _node(
+    qualified_name="mod.f",
+    kind="function",
+    file_path="m.py",
+    span=None,
+    metadata=None,
+):
     return SimpleNamespace(
         qualified_name=qualified_name,
         name=qualified_name.rsplit(".", 1)[-1],
@@ -51,5 +56,6 @@ def test_span_move_changes_the_hash():
 
     # Act / Assert
     assert content_hash(ROOT, _node(span=span_a)) != content_hash(
-        ROOT, _node(span=span_b),
+        ROOT,
+        _node(span=span_b),
     )

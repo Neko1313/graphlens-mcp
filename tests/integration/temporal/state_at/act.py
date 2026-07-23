@@ -36,11 +36,17 @@ async def test_state_at_reflects_each_commit_point_in_time(graph_store):
     # commit s2 (seq 2) drops a, adds c.
     await temporal.ensure_temporal_schema(graph_store)
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"),
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
         [_node("a", "mod.a"), _node("b", "mod.b")],
     )
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s2"),
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s2"),
         [_node("b", "mod.b"), _node("c", "mod.c")],
     )
 
@@ -60,12 +66,20 @@ async def test_reindexing_the_same_commit_is_a_no_op(graph_store):
     await temporal.ensure_temporal_schema(graph_store)
     nodes = [_node("a", "mod.a"), _node("b", "mod.b")]
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"), nodes,
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
+        nodes,
     )
 
     # Act — re-run the identical commit (same sha).
     counts = await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"), nodes,
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
+        nodes,
     )
 
     # Assert — no new versions; it resolves to the commit's original seq.
@@ -86,11 +100,17 @@ async def test_out_of_order_indexing_advances_head_monotonically(graph_store):
 
     # Arrange / Act — first run sees {b, c}; a later run indexes {a, b, c}.
     first = await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("newer"),
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("newer"),
         [_node("b", "mod.b"), _node("c", "mod.c")],
     )
     second = await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("older"),
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("older"),
         [_node("a", "mod.a"), _node("b", "mod.b"), _node("c", "mod.c")],
     )
 
@@ -107,13 +127,19 @@ async def test_content_change_is_recorded_as_an_update(graph_store):
     # Arrange — same node id, different metadata across two commits.
     await temporal.ensure_temporal_schema(graph_store)
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"),
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
         [_node("a", "mod.a", metadata={"sig": "() -> int"})],
     )
 
     # Act
     counts = await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s2"),
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s2"),
         [_node("a", "mod.a", metadata={"sig": "() -> str"})],
     )
 

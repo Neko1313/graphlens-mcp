@@ -35,7 +35,13 @@ def _commit(sha, time_update=100):
 
 async def _callees(store, node_id, at_seq):
     rows = await temporal.edges_at(
-        store, PROJECT, "main", at_seq, [node_id], "out", "calls",
+        store,
+        PROJECT,
+        "main",
+        at_seq,
+        [node_id],
+        "out",
+        "calls",
     )
     return {row["target_id"] for row in rows}
 
@@ -48,12 +54,20 @@ async def test_each_point_in_time_keeps_its_own_edges(graph_store):
     # Arrange — seq 1: a→b. seq 2: a→b dropped, a→c added.
     await temporal.ensure_temporal_schema(graph_store)
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"),
-        [_node("a"), _node("b"), _node("c")], [_rel("a", "b")],
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
+        [_node("a"), _node("b"), _node("c")],
+        [_rel("a", "b")],
     )
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s2"),
-        [_node("a"), _node("b"), _node("c")], [_rel("a", "c")],
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s2"),
+        [_node("a"), _node("b"), _node("c")],
+        [_rel("a", "c")],
     )
 
     # Act
@@ -74,15 +88,30 @@ async def test_a_deleted_edge_stays_deleted_at_later_points(graph_store):
     await temporal.ensure_temporal_schema(graph_store)
     nodes = [_node("a"), _node("b")]
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"), nodes, [_rel("a", "b")],
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
+        nodes,
+        [_rel("a", "b")],
     )
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s2"), nodes, [],
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s2"),
+        nodes,
+        [],
     )
 
     # Act — a third commit that touches nothing.
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s3"), nodes, [],
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s3"),
+        nodes,
+        [],
     )
 
     # Assert
@@ -99,12 +128,21 @@ async def test_only_changed_edges_are_appended(graph_store):
     nodes = [_node("a"), _node("b"), _node("c")]
     edges = [_rel("a", "b"), _rel("b", "c")]
     await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"), nodes, edges,
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
+        nodes,
+        edges,
     )
 
     # Act — one edge unchanged, one gone, one new.
     counts = await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s2"), nodes,
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s2"),
+        nodes,
         [_rel("a", "b"), _rel("a", "c")],
     )
 
@@ -122,7 +160,11 @@ async def test_edges_to_unknown_nodes_are_not_logged(graph_store):
     # Arrange / Act
     await temporal.ensure_temporal_schema(graph_store)
     counts = await temporal.append_versions(
-        graph_store, ".", PROJECT, _commit("s1"), [_node("a")],
+        graph_store,
+        ".",
+        PROJECT,
+        _commit("s1"),
+        [_node("a")],
         [_rel("a", "ghost")],
     )
 

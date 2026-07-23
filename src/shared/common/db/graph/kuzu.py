@@ -123,7 +123,8 @@ class KuzuGraphStore:
         """
         async with self._gate.exclusive():
             connection = await asyncio.to_thread(
-                kuzu.Connection, self._database,
+                kuzu.Connection,
+                self._database,
             )
             transaction = _KuzuTransaction(connection)
             try:

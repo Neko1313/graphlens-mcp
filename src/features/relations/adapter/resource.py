@@ -15,7 +15,12 @@ async def relations(
 ) -> dict[str, object]:
     """Callers and callees of a symbol (see ``get_relations``)."""
     result = await service.get_relations(
-        get_graph_store(), project, id, depth, limit, kinds,
+        get_graph_store(),
+        project,
+        id,
+        depth,
+        limit,
+        kinds,
     )
     if result is None:
         msg = f"unknown node {id} in project {project}"

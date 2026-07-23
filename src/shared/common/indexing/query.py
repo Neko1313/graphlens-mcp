@@ -38,12 +38,19 @@ async def resolve_symbol_at(
     resolves at the revision where it existed.
     """
     rows = await temporal.state_at(
-        graph_store, project_id, point.ref, point.seq, [target],
+        graph_store,
+        project_id,
+        point.ref,
+        point.seq,
+        [target],
     )
     if rows:
         return target, []
     live = await temporal.state_at(
-        graph_store, project_id, point.ref, point.seq,
+        graph_store,
+        project_id,
+        point.ref,
+        point.seq,
     )
     candidates = [
         {

@@ -9,7 +9,9 @@ PROJECT = "proj_hist"
 CALLS_HELPER = (
     "def helper():\n    return 1\n\n\ndef caller():\n    return helper()\n"
 )
-CALLS_NOTHING = "def helper():\n    return 1\n\n\ndef caller():\n    return 2\n"
+CALLS_NOTHING = (
+    "def helper():\n    return 1\n\n\ndef caller():\n    return 2\n"
+)
 
 
 def _project(tmp_path, module_body):
@@ -35,14 +37,20 @@ async def _node_id(graph_store, name):
 @pytest.mark.integration
 @pytest.mark.temporal
 async def test_the_pipeline_records_the_call_graph_of_each_commit(
-    tmp_path, graph_store, vector_store,
+    tmp_path,
+    graph_store,
+    vector_store,
 ):
     # End to end: a real analyze of a real edit, through the real pipeline —
     # the point-in-time answer must follow the code, not the current graph.
     # Arrange — commit one calls helper(); commit two stops calling it.
     root = _project(tmp_path, CALLS_HELPER)
     await index_project_graph(
-        root, PROJECT, graph_store, vector_store, None,
+        root,
+        PROJECT,
+        graph_store,
+        vector_store,
+        None,
         CommitInfo(ref="main", sha="a" * 40, time_update=1),
     )
     caller = await _node_id(graph_store, "caller")
@@ -50,7 +58,11 @@ async def test_the_pipeline_records_the_call_graph_of_each_commit(
 
     _project(tmp_path, CALLS_NOTHING)
     result = await index_project_graph(
-        root, PROJECT, graph_store, vector_store, None,
+        root,
+        PROJECT,
+        graph_store,
+        vector_store,
+        None,
         CommitInfo(ref="main", sha="b" * 40, time_update=2),
     )
 
@@ -60,10 +72,16 @@ async def test_the_pipeline_records_the_call_graph_of_each_commit(
     assert before is not None
     assert after is not None
     then = await relations_service.get_relations_at(
-        graph_store, PROJECT, before, caller,
+        graph_store,
+        PROJECT,
+        before,
+        caller,
     )
     now = await relations_service.get_relations_at(
-        graph_store, PROJECT, after, caller,
+        graph_store,
+        PROJECT,
+        after,
+        caller,
     )
 
     # Assert — the removed call survives at the commit that had it.

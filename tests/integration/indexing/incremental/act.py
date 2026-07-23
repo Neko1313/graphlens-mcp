@@ -29,7 +29,9 @@ async def _index(root, graph_store, vector_store):
 @pytest.mark.integration
 @pytest.mark.indexing
 async def test_reindexing_unchanged_reembeds_nothing(
-    tmp_path, graph_store, vector_store,
+    tmp_path,
+    graph_store,
+    vector_store,
 ):
     # Arrange
     root = _project(tmp_path, TWO_FUNCS)
@@ -48,7 +50,9 @@ async def test_reindexing_unchanged_reembeds_nothing(
 @pytest.mark.integration
 @pytest.mark.indexing
 async def test_editing_one_symbol_reembeds_only_it(
-    tmp_path, graph_store, vector_store,
+    tmp_path,
+    graph_store,
+    vector_store,
 ):
     # Arrange
     root = _project(tmp_path, TWO_FUNCS)
@@ -67,7 +71,9 @@ async def test_editing_one_symbol_reembeds_only_it(
 @pytest.mark.integration
 @pytest.mark.indexing
 async def test_same_size_mtime_preserved_edit_is_detected(
-    tmp_path, graph_store, vector_store,
+    tmp_path,
+    graph_store,
+    vector_store,
 ):
     # Regression (P03 review): a same-byte-size body edit whose mtime is
     # restored (coarse-mtime FS / tar / cp -p) must still be caught — the
@@ -90,7 +96,9 @@ async def test_same_size_mtime_preserved_edit_is_detected(
 @pytest.mark.integration
 @pytest.mark.indexing
 async def test_removing_a_symbol_deletes_it_from_graph(
-    tmp_path, graph_store, vector_store,
+    tmp_path,
+    graph_store,
+    vector_store,
 ):
     # Arrange
     root = _project(tmp_path, TWO_FUNCS)

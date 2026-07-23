@@ -30,8 +30,14 @@ async def search(params: SearchParams) -> list[TextContent | ResourceLink]:
     registry = get_registry_store()
     project_id = await resolve_project(registry, params.project)
     hits = await service.search(
-        graph_store, get_vector_store(), registry, params.query, project_id,
-        params.limit, params.path_glob, exhaustive=params.exhaustive,
+        graph_store,
+        get_vector_store(),
+        registry,
+        params.query,
+        project_id,
+        params.limit,
+        params.path_glob,
+        exhaustive=params.exhaustive,
     )
 
     blocks: list[TextContent | ResourceLink] = [
@@ -44,7 +50,10 @@ async def search(params: SearchParams) -> list[TextContent | ResourceLink]:
         label = _label(hit.kind, hit.signature, hit.file_path, hit.line)
         if params.verbosity == "detailed" and hit.id:
             src, _ = await service.get_node_source(
-                graph_store, registry, project_id, hit.id,
+                graph_store,
+                registry,
+                project_id,
+                hit.id,
             )
             blocks.append(
                 TextContent(
@@ -58,8 +67,11 @@ async def search(params: SearchParams) -> list[TextContent | ResourceLink]:
         else:
             blocks.append(
                 ResourceLink(
-                    type="resource_link", name=hit.name, uri=hit.uri,
-                    description=label, mime_type="text/x-python",
+                    type="resource_link",
+                    name=hit.name,
+                    uri=hit.uri,
+                    description=label,
+                    mime_type="text/x-python",
                 ),
             )
     return blocks

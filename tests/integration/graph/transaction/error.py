@@ -69,7 +69,9 @@ async def test_the_store_still_works_after_a_failed_transaction(graph_store):
 @pytest.mark.integration
 @pytest.mark.temporal
 async def test_an_aborted_append_strands_no_version_rows(
-    graph_store, monkeypatch, tmp_path,
+    graph_store,
+    monkeypatch,
+    tmp_path,
 ):
     # Regression (final review, #3): the append used to write NodeVersion rows,
     # RefCommit, and RefState as separate autocommits, so a crash between them
@@ -77,8 +79,13 @@ async def test_an_aborted_append_strands_no_version_rows(
     # blocking that seq for the next commit. It is one transaction now.
     # Arrange
     await temporal.ensure_temporal_schema(graph_store)
-    project, commit = "tx_temporal", CommitInfo(
-        ref="main", sha="a" * 40, time_update=1,
+    project, commit = (
+        "tx_temporal",
+        CommitInfo(
+            ref="main",
+            sha="a" * 40,
+            time_update=1,
+        ),
     )
     original = temporal._advance_head
 
@@ -92,7 +99,10 @@ async def test_an_aborted_append_strands_no_version_rows(
     # Act
     with pytest.raises(_Boom):
         await temporal.append_versions(
-            graph_store, tmp_path, project, commit,
+            graph_store,
+            tmp_path,
+            project,
+            commit,
             [_node("a"), _node("b")],
         )
 

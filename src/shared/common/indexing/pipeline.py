@@ -127,7 +127,9 @@ async def _prepare_embeddings(
         vectors = await asyncio.to_thread(_encode_chunk, root, chunk)
         pairs.extend(zip(chunk, vectors, strict=True))
         await _report(
-            on_progress, 0, total,
+            on_progress,
+            0,
+            total,
             f"Prepared embeddings {len(pairs)}/{len(embeddable)}…",
         )
     return pairs
@@ -147,7 +149,9 @@ async def _persist_touched(
     for index, (file_path, file_nodes) in enumerate(by_file.items(), start=1):
         await persist.persist_nodes(graph_store, root, project_id, file_nodes)
         await _report(
-            on_progress, round(index / n_files * total), total,
+            on_progress,
+            round(index / n_files * total),
+            total,
             f"Indexed {file_path or '<no file>'}",
         )
 
@@ -162,7 +166,8 @@ async def _delete_vectors(
     for start in range(0, len(gids), _VECTOR_BATCH):
         chunk = gids[start : start + _VECTOR_BATCH]
         await vector_store.delete(
-            CODE_COLLECTION, persist.vector_ids_filter(chunk),
+            CODE_COLLECTION,
+            persist.vector_ids_filter(chunk),
         )
 
 
@@ -191,7 +196,10 @@ async def _store_vectors(
         await vector_store.upsert(CODE_COLLECTION, rows)
         embedded += len(rows)
         await _report(
-            on_progress, total, total, f"Stored {embedded} embeddings…",
+            on_progress,
+            total,
+            total,
+            f"Stored {embedded} embeddings…",
         )
     return embedded
 
@@ -227,12 +235,17 @@ async def index_project_graph(
     file_total = await asyncio.to_thread(_count_files, root, languages)
     total = max(file_total, 1)
     await _report(
-        on_progress, 0, total,
+        on_progress,
+        0,
+        total,
         f"Found {file_total} files ({', '.join(lang_names)})",
     )
 
     graph, resolver_status, unresolved = await _analyze(
-        root, languages, total, on_progress,
+        root,
+        languages,
+        total,
+        on_progress,
     )
     nodes = list(graph.nodes.values()) if graph is not None else []
     relations = graph.relations if graph is not None else []
@@ -266,17 +279,30 @@ async def index_project_graph(
     if removed:
         await _delete_vectors(vector_store, project_id, removed)
     embedded = await _store_vectors(
-        project_id, root, pairs, vector_store, total, on_progress,
+        project_id,
+        root,
+        pairs,
+        vector_store,
+        total,
+        on_progress,
     )
 
     await _persist_touched(
-        root, graph_store, project_id, touched, total, on_progress,
+        root,
+        graph_store,
+        project_id,
+        touched,
+        total,
+        on_progress,
     )
     if removed:
         await persist.delete_nodes(graph_store, project_id, removed)
     await persist.clear_relations(graph_store, project_id)
     rel_count = await persist.persist_relations(
-        graph_store, project_id, relations, set(new_by_id),
+        graph_store,
+        project_id,
+        relations,
+        set(new_by_id),
     )
 
     # Record the graph head right after the graph body (and before temporal),
@@ -287,7 +313,8 @@ async def index_project_graph(
         await persist.set_graph_head(graph_store, project_id, commit.sha)
 
     embeddable_total = sum(
-        1 for node in nodes
+        1
+        for node in nodes
         if node.kind.value in EMBED_KINDS and node.file_path
     )
 
@@ -295,7 +322,12 @@ async def index_project_graph(
     if commit is not None:
         await temporal.ensure_temporal_schema(graph_store)
         changes = await temporal.append_versions(
-            graph_store, root, project_id, commit, nodes, relations,
+            graph_store,
+            root,
+            project_id,
+            commit,
+            nodes,
+            relations,
         )
 
     await _report(on_progress, total, total, "Done")

@@ -5,8 +5,10 @@ from shared.common.db.graph.kuzu import KuzuGraphStore
 
 __all__ = ["KuzuProjectRegistry"]
 
-_FIELDS = "p.id AS id, p.name AS name, p.path AS path, " \
+_FIELDS = (
+    "p.id AS id, p.name AS name, p.path AS path, "
     "p.description AS description, p.git_url AS git_url"
+)
 
 
 class KuzuProjectRegistry:
