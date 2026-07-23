@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from entities.project import Project
 
 __all__ = [
+    "AlreadyCurrent",
     "Cancelled",
     "Candidates",
     "Declined",
@@ -18,8 +19,6 @@ __all__ = [
     "NotFound",
     "OutlineEntry",
     "ProjectNotFound",
-    "RefreshProjectResult",
-    "Refreshed",
     "RelationsLookup",
     "RelationsResult",
     "RemoveProjectResult",
@@ -160,18 +159,24 @@ class Indexed(BaseModel):
     relations: int
     embedded: int
     resolver_status: dict[str, str]
+    reused: int = 0
+    deleted: int = 0
+    unresolved: int = 0
+    ref: str | None = None
+    changes: dict[str, int] | None = None
 
 
-class Refreshed(BaseModel):
-    """An already-registered project was re-indexed from its stored path."""
+class AlreadyCurrent(BaseModel):
+    """A server-mode index was skipped: the ref's HEAD is already indexed.
 
-    status: Literal["refreshed"] = "refreshed"
+    Resolved from ``git ls-remote`` against the last-indexed sha, so no clone
+    was performed.
+    """
+
+    status: Literal["already_current"] = "already_current"
     project: str
-    files: int
-    nodes: int
-    relations: int
-    embedded: int
-    resolver_status: dict[str, str]
+    ref: str
+    sha: str
 
 
 class Removed(BaseModel):
@@ -208,11 +213,7 @@ class ProjectNotFound(BaseModel):
 
 
 IndexProjectResult = Annotated[
-    Indexed | Skipped | Declined | Cancelled,
-    Field(discriminator="status"),
-]
-RefreshProjectResult = Annotated[
-    Refreshed | ProjectNotFound,
+    Indexed | AlreadyCurrent | Skipped | Declined | Cancelled,
     Field(discriminator="status"),
 ]
 RemoveProjectResult = Annotated[

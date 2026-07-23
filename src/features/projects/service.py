@@ -1,9 +1,21 @@
+import asyncio
 import hashlib
 import re
-from pathlib import Path
+import shutil
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 from entities.project import Project
-from features.projects.git import get_remote_url
+from features.projects.git import (
+    clone_into,
+    get_remote_url,
+    head_commit,
+    ls_remote,
+    new_checkout_dir,
+    remove_retained,
+    retain_checkout,
+)
+from shared.common.context import AppContext
 from shared.common.db.graph import GraphStore
 from shared.common.db.registry import ProjectRegistry
 from shared.common.db.vector import VectorStore
@@ -12,34 +24,110 @@ from shared.common.indexing import (
     ProgressCallback,
     index_project_graph,
     persist,
+    temporal,
 )
+from shared.common.setting.const import CODE_COLLECTION
 
 __all__ = [
+    "NoRemoteError",
     "build_project",
     "compute_project_id",
     "get_project",
     "index_project",
+    "index_remote",
     "list_projects",
-    "refresh_project",
+    "normalize_remote",
+    "normalize_subpath",
+    "remote_head",
     "remove_project",
 ]
 
 _SLUG_RE = re.compile(r"[^0-9A-Za-z]+")
 _MAX_SLUG = 40
 
+# scp-style remote [user@]host:path: no scheme, colon splits host.
+_SCP_RE = re.compile(r"^(?:[^@/]+@)?(?P<host>[^/:]+):(?P<path>.+)$")
 
-def compute_project_id(root: Path) -> str:
-    """A stable id derived from the resolved absolute path.
 
-    Path-based (not git-url-based): the same checkout must map to the same
-    index across re-runs, one remote can back several indexable subtrees, and
-    two clones of one repo are two projects. The result is a short ASCII token
-    that starts with a letter/underscore — valid as both a vector collection
-    name and a store key.
+class NoRemoteError(ValueError):
+    """Raised when a project has no git remote to derive its identity from.
+
+    Identity is ``hash(git remote + subpath)`` so the same repo maps to one
+    project across a dev clone and a CI clone. A repo with no remote
+    (un-pushed, or a non-git directory) has no stable identity and is not
+    indexable.
     """
-    resolved = root.resolve()
-    digest = hashlib.sha256(str(resolved).encode()).hexdigest()[:12]
-    slug = _SLUG_RE.sub("_", resolved.name).strip("_").lower()[:_MAX_SLUG]
+
+
+def normalize_remote(url: str) -> str:
+    """Canonicalize a git remote URL to ``host/owner/repo`` (lowercased).
+
+    The point is that every spelling of the *same* remote collapses to one
+    identity — so a dev clone over ssh and a server's CI clone over https index
+    into the same project. So this drops the scheme, any ``user[:token]@``
+    userinfo, the port, a trailing ``.git``, and surrounding slashes, then
+    lowercases the whole thing.
+
+    Lowercasing owner/repo (not just the DNS host) is deliberate: GitHub/GitLab
+    treat them case-insensitively, and matching dev↔CI matters more than the
+    negligible risk of two repos differing only by case on a case-sensitive
+    host.
+    """
+    raw = url.strip()
+    if "://" in raw:
+        parsed = urlsplit(raw)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path
+    else:
+        match = _SCP_RE.match(raw)
+        if match is not None:
+            host = match.group("host").lower()
+            path = match.group("path")
+        else:
+            host, path = "", raw
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    canonical = f"{host}/{path}" if host else path
+    return canonical.strip("/").lower()
+
+
+def normalize_subpath(subpath: str | None) -> str:
+    """Normalize a monorepo subpath to a clean POSIX-relative form.
+
+    ``""``/``"."``/``"/"`` all mean the whole repo (returns ``""``). Leading
+    and trailing slashes and redundant ``.`` segments are dropped. A ``..``
+    segment is rejected — a subpath must stay inside the repo.
+    """
+    if not subpath:
+        return ""
+    parts = [
+        part
+        for part in PurePosixPath(subpath.replace("\\", "/")).parts
+        if part not in ("", ".", "/")
+    ]
+    if any(part == ".." for part in parts):
+        msg = f"subpath must stay inside the repo (got {subpath!r})"
+        raise ValueError(msg)
+    return "/".join(parts)
+
+
+def compute_project_id(remote: str, subpath: str | None = "") -> str:
+    """A stable project id derived from ``hash(remote + subpath)``.
+
+    Two clones of the same repo+subpath (at any on-disk path) map to the same
+    id — the intended server-side dedup — while distinct monorepo subtrees
+    stay separate. The result keeps a readable ``{slug}_{digest}`` shape and
+    an ``[A-Za-z0-9_]``-only charset starting with a letter/underscore, so it
+    is valid as both a graph filter value and a Milvus scalar.
+    """
+    canonical = normalize_remote(remote)
+    sub = normalize_subpath(subpath)
+    material = f"{canonical}\x00{sub}"
+    digest = hashlib.sha256(material.encode()).hexdigest()[:12]
+    repo = canonical.rsplit("/", 1)[-1] or canonical
+    slug_source = f"{repo}_{sub}" if sub else repo
+    slug = _SLUG_RE.sub("_", slug_source).strip("_").lower()[:_MAX_SLUG]
     if not slug:
         slug = "project"
     project_id = f"{slug}_{digest}"
@@ -52,65 +140,121 @@ def build_project(
     root: Path,
     name: str | None = None,
     description: str | None = None,
+    subpath: str | None = "",
 ) -> Project:
-    """Assemble a Project from a path, filling in id, name, and git url."""
+    """Assemble a Project from a checkout, deriving identity from its remote.
+
+    Raises ``NoRemoteError`` when ``root`` has no git remote — identity needs
+    one, so un-pushed/non-git directories are not indexable.
+    """
     resolved = root.resolve()
+    remote = get_remote_url(resolved)
+    if remote is None:
+        msg = (
+            f"{resolved} has no git remote — project identity is "
+            "hash(remote + subpath), so add a remote (or push the repo) "
+            "first. Un-pushed or non-git directories are not indexable."
+        )
+        raise NoRemoteError(msg)
+    sub = normalize_subpath(subpath)
     return Project(
-        id=compute_project_id(resolved),
-        name=name or resolved.name,
+        id=compute_project_id(remote, sub),
+        name=name or (PurePosixPath(sub).name if sub else resolved.name),
         path=resolved,
+        subpath=sub,
         description=description or None,
-        git_url=get_remote_url(resolved),
+        git_url=remote,
     )
 
 
 async def index_project(
     project: Project,
-    graph_store: GraphStore,
-    vector_store: VectorStore,
-    registry: ProjectRegistry,
+    app: AppContext,
     on_progress: ProgressCallback | None = None,
-    subpaths: list[str] | None = None,
 ) -> IndexResult:
     """Index the project's code graph + embeddings, then register it.
 
     Registration happens last so a failed index (e.g. a path with no
-    supported languages) never leaves a phantom entry in the registry.
-    ``subpaths`` restricts indexing to those subdirectories.
+    supported languages) never leaves a phantom entry in the registry. The
+    project's ``subpath`` restricts indexing to that subdirectory; the
+    checkout's HEAD is captured so the run is recorded in the temporal log.
     """
+    commit = await asyncio.to_thread(head_commit, project.path)
     result = await index_project_graph(
         project.path,
         project.id,
-        graph_store,
-        vector_store,
+        app.graph_store,
+        app.vector_store,
         on_progress,
-        subpaths,
+        project.subpath,
+        commit,
     )
-    await registry.add(project)
+    await app.registry.add(project)
     return result
 
 
-async def refresh_project(
+async def remote_head(
+    repo_url: str,
+    ref: str | None,
+    ci_token: str | None,
+    subpath: str,
     graph_store: GraphStore,
-    vector_store: VectorStore,
-    registry: ProjectRegistry,
-    project_id: str,
-    on_progress: ProgressCallback | None = None,
-) -> IndexResult | None:
-    """Re-index an already-registered project from its stored path.
+) -> tuple[str, str, str] | None:
+    """``(project_id, ref, sha)`` if the remote ref's HEAD is already indexed.
 
-    None if the project isn't registered.
+    The no-op fast path: resolve the ref via ``git ls-remote`` and compare it
+    to the sha the project's graph currently reflects, so an unchanged repo
+    never pays for a clone. Gated on the graph head (not "sha ever indexed on
+    any ref"): the graph is a single latest snapshot, so after another ref was
+    indexed it holds that ref's sha and this one must be re-indexed. Only runs
+    when ``ref`` is given; otherwise, or when the sha differs, returns
+    ``None``.
     """
-    project = await registry.get(project_id)
-    if project is None:
+    if not ref:
         return None
-    return await index_project_graph(
-        project.path,
-        project.id,
-        graph_store,
-        vector_store,
-        on_progress,
-    )
+    sha = await asyncio.to_thread(ls_remote, repo_url, ref, ci_token)
+    if sha is None:
+        return None
+    project_id = compute_project_id(repo_url, subpath)
+    if await persist.graph_head(graph_store, project_id) == sha:
+        return project_id, ref, sha
+    return None
+
+
+async def index_remote(
+    repo_url: str,
+    ref: str | None,
+    ci_token: str | None,
+    subpath: str | None,
+    app: AppContext,
+    on_progress: ProgressCallback | None = None,
+) -> tuple[Project, IndexResult]:
+    """Clone ``repo_url@ref``, index it, and retain the tree for reads.
+
+    Identity comes from the clone's remote (which is ``repo_url``), so a
+    server-side CI clone and a developer's clone map to the same project. Name
+    and description default from the repo/subpath (server mode is
+    non-interactive). The clone lands in a pid-named dir (removed in a
+    ``finally`` so a cancelled clone can't leak it); on success it is moved to
+    a stable per-project tree that the read paths use, since indexing deletes
+    the checkout otherwise and disk-backed reads would then fail.
+    """
+    dest = new_checkout_dir()
+    try:
+        ok = await asyncio.to_thread(clone_into, repo_url, ref, ci_token, dest)
+        if not ok:
+            detail = f" (ref {ref})" if ref else ""
+            msg = f"failed to clone {repo_url}{detail}"
+            raise ValueError(msg)
+        project = await asyncio.to_thread(
+            build_project, dest, None, None, subpath,
+        )
+        stable = await asyncio.to_thread(retain_checkout, dest, project.id)
+        project = project.model_copy(update={"path": stable})
+        result = await index_project(project, app, on_progress)
+    finally:
+        await asyncio.to_thread(shutil.rmtree, dest, ignore_errors=True)
+    return project, result
 
 
 async def list_projects(registry: ProjectRegistry) -> list[Project]:
@@ -130,7 +274,15 @@ async def remove_project(
     registry: ProjectRegistry,
     project_id: str,
 ) -> None:
-    """Delete a project's graph nodes, vectors, and registry entry."""
+    """Delete a project's graph nodes, vectors, history, and registry entry.
+
+    Vectors are cleared by filter from the shared collection (not by dropping a
+    collection), matching the filter-not-boundary isolation model.
+    """
     await persist.clear_project(graph_store, project_id)
-    await vector_store.drop_collection(project_id)
+    await temporal.clear_project(graph_store, project_id)
+    await vector_store.delete(
+        CODE_COLLECTION, persist.vector_project_filter(project_id),
+    )
+    await asyncio.to_thread(remove_retained, project_id)
     await registry.remove(project_id)

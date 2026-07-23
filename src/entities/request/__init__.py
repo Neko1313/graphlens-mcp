@@ -1,11 +1,10 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, model_validator
 
 __all__ = [
-    "IndexProjectParams",
+    "IndexParams",
     "InfoParams",
-    "RefreshProjectParams",
     "RelationsParams",
     "RemoveProjectParams",
     "SearchParams",
@@ -106,33 +105,62 @@ class SearchParams(BaseModel):
     )
 
 
-class IndexProjectParams(BaseModel):
-    """Arguments for the ``index_project`` tool."""
+class IndexParams(BaseModel):
+    """Arguments for the ``index`` tool — exactly one source.
 
-    path: str = Field(
-        description="A directory to index into the code graph.",
+    Local use passes ``directory`` (an on-disk checkout); server/CI use passes
+    ``repo_url`` (cloned to a tmp dir). Re-running ``index`` on the same source
+    refreshes that project in place — there is no separate refresh tool.
+    """
+
+    directory: str | None = Field(
+        default=None,
+        description="A local checkout to index. Must be a git repo with a "
+        "remote (identity is hash(remote + subpath)). Mutually exclusive with "
+        "repo_url.",
+    )
+    repo_url: str | None = Field(
+        default=None,
+        description="A remote repository to clone and index (server/CI use). "
+        "Mutually exclusive with directory.",
+    )
+    ref: str | None = Field(
+        default=None,
+        description="Branch/ref to index. With repo_url: which branch to "
+        "clone (defaults to the remote's HEAD). With a local directory: "
+        "informational — the checkout's current ref is used.",
+    )
+    ci_token: SecretStr | None = Field(
+        default=None,
+        description="Git token to clone a private repo_url. Sensitive — never "
+        "logged. Ignored for a local directory.",
+    )
+    subpath: str = Field(
+        default="",
+        description="Restrict indexing to this subdirectory (monorepo scope). "
+        "Each subpath is its own project (identity = repo + subpath), so "
+        "index several subtrees with several calls. Omit for the whole repo.",
     )
     name: str | None = Field(
         default=None,
-        description="Project name; defaults to the directory name.",
+        description="Project name; defaults to the repo/subpath name.",
     )
     description: str | None = Field(
         default=None,
         description="Short description of the project (optional).",
     )
-    subpaths: list[str] | None = Field(
-        default=None,
-        description="Restrict indexing to these subdirectories (monorepo "
-        "scope). Omit to index the whole directory.",
-    )
 
-
-class RefreshProjectParams(BaseModel):
-    """Arguments for the ``refresh_project`` tool."""
-
-    project: str = Field(
-        description="The id of an already-registered project to re-index.",
-    )
+    @model_validator(mode="after")
+    def _one_source(self) -> "IndexParams":
+        # Normalize blank strings to None so a client sending "" for the
+        # unused source can't diverge the exactly-one check from the
+        # downstream `is not None` dispatch.
+        self.directory = self.directory or None
+        self.repo_url = self.repo_url or None
+        if (self.directory is None) == (self.repo_url is None):
+            msg = "provide exactly one of 'directory' or 'repo_url'"
+            raise ValueError(msg)
+        return self
 
 
 class RemoveProjectParams(BaseModel):

@@ -4,17 +4,15 @@ from features.projects.adapter.resource import (
     unregister_project_resource,
 )
 from features.projects.adapter.tool import (
-    index_project,
+    index,
     list_projects,
-    refresh_project,
     remove_project,
 )
 
 __all__ = [
     "hydrate_project_resources",
-    "index_project",
+    "index",
     "list_projects",
-    "refresh_project",
     "register_project_resource",
     "remove_project",
     "unregister_project_resource",

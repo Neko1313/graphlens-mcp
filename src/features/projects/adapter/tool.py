@@ -9,19 +9,14 @@ from mcp.server.mcpserver import (
 from pydantic import BaseModel, Field
 
 from entities.project import Project
-from entities.request import (
-    IndexProjectParams,
-    RefreshProjectParams,
-    RemoveProjectParams,
-)
+from entities.request import IndexParams, RemoveProjectParams
 from entities.result import (
+    AlreadyCurrent,
     Cancelled,
     Declined,
     Indexed,
     IndexProjectResult,
     ProjectNotFound,
-    Refreshed,
-    RefreshProjectResult,
     Removed,
     RemoveProjectResult,
     Skipped,
@@ -32,12 +27,12 @@ from features.projects.adapter.resource import (
     register_project_resource,
     unregister_project_resource,
 )
+from features.projects.git import sweep_stale_checkouts
 from shared.common.context import AppContext
 
 __all__ = [
-    "index_project",
+    "index",
     "list_projects",
-    "refresh_project",
     "remove_project",
 ]
 
@@ -77,65 +72,104 @@ def _validated_root(path: str) -> Path:
     return root
 
 
-async def index_project(
-    params: IndexProjectParams,
+async def _confirm_local(
+    ctx: Context[AppContext],
+    project: Project,
+    root: Path,
+    subpath: str,
+) -> Project | Skipped | Declined | Cancelled:
+    """Interactive confirm for a local index.
+
+    Returns the (possibly renamed) project to proceed, or a terminal outcome
+    when the user declines/cancels. No-op (returns the project) when the client
+    can't elicit — server/CI callers never see a prompt.
+    """
+    caps = ctx.client_capabilities
+    if getattr(caps, "elicitation", None) is None:
+        return project
+    try:
+        answer = await ctx.elicit(
+            message=(
+                f"Index {project.name}?\n"
+                f"Path: {project.path}\n"
+                f"Sub:  {project.subpath or '(whole repo)'}\n"
+                f"Git:  {project.git_url or '(none)'}\n"
+                f"ID:   {project.id}"
+            ),
+            schema=_IndexConfirmation,
+        )
+    except Exception:
+        return project
+    if isinstance(answer, AcceptedElicitation):
+        if not answer.data.confirm:
+            return Skipped(reason="not confirmed")
+        return await asyncio.to_thread(
+            service.build_project,
+            root,
+            answer.data.name.strip() or project.name,
+            answer.data.description.strip() or project.description,
+            subpath,
+        )
+    if isinstance(answer, DeclinedElicitation):
+        return Declined()
+    return Cancelled() if answer is not None else project
+
+
+async def index(
+    params: IndexParams,
     ctx: Context[AppContext],
 ) -> IndexProjectResult:
-    """Index a project directory into the code graph so it can be searched.
+    """Index a project into the code graph so it can be searched.
 
-    Parses the project with graphlens, stores its symbols and relations, and
-    embeds functions/classes/methods for semantic search. Reports progress as
-    it works, and asks the user to confirm (and optionally name/describe the
-    project) when the client supports it. Re-running on the same path refreshes
-    that project's index in place. Does NOT search the code; use the search
-    tools for that.
+    Give exactly one source: ``directory`` (a local checkout) or ``repo_url``
+    (a remote cloned to a temp dir, for server/CI use). Parses with graphlens,
+    stores symbols and relations, embeds functions/classes/methods, and records
+    the HEAD commit in the temporal log. Reports progress; in local mode it
+    asks to confirm when the client supports it.
+
+    Project identity is hash(git remote + subpath), NOT the on-disk path: two
+    clones of the same repo+subpath are one project (re-running ``index``
+    refreshes it in place — there is no separate refresh tool), while different
+    subpaths of one repo are different projects. Requires a git remote. Does
+    NOT search the code; use the search tools for that.
     """
     app = ctx.request_context.lifespan_context
-    root = await asyncio.to_thread(_validated_root, params.path)
-
-    project = await asyncio.to_thread(
-        service.build_project, root, params.name, params.description,
-    )
-
-    caps = ctx.client_capabilities
-    if getattr(caps, "elicitation", None) is not None:
-        try:
-            answer = await ctx.elicit(
-                message=(
-                    f"Index {project.name}?\n"
-                    f"Path: {project.path}\n"
-                    f"Git:  {project.git_url or '(none)'}\n"
-                    f"ID:   {project.id}"
-                ),
-                schema=_IndexConfirmation,
-            )
-        except Exception:
-            answer = None
-        if isinstance(answer, AcceptedElicitation):
-            if not answer.data.confirm:
-                return Skipped(reason="not confirmed")
-            project = await asyncio.to_thread(
-                service.build_project,
-                root,
-                answer.data.name.strip() or project.name,
-                answer.data.description.strip() or project.description,
-            )
-        elif isinstance(answer, DeclinedElicitation):
-            return Declined()
-        elif answer is not None:
-            return Cancelled()
+    await asyncio.to_thread(sweep_stale_checkouts)
 
     async def on_progress(done: float, total: float, message: str) -> None:
         await ctx.report_progress(done, total, message)
 
-    result = await service.index_project(
-        project,
-        app.graph_store,
-        app.vector_store,
-        app.registry,
-        on_progress,
-        params.subpaths,
-    )
+    token = params.ci_token.get_secret_value() if params.ci_token else None
+
+    if params.repo_url is not None:
+        current = await service.remote_head(
+            params.repo_url, params.ref, token, params.subpath,
+            app.graph_store,
+        )
+        if current is not None:
+            project_id, ref, sha = current
+            # Only skip if the project is actually registered — a graph_head
+            # that outlived a failed registry.add would otherwise strand an
+            # unlisted, un-removable project; falling through re-registers it.
+            registered = await service.get_project(app.registry, project_id)
+            if registered is not None:
+                return AlreadyCurrent(project=project_id, ref=ref, sha=sha)
+        project, result = await service.index_remote(
+            params.repo_url, params.ref, token, params.subpath,
+            app, on_progress,
+        )
+    else:
+        root = await asyncio.to_thread(_validated_root, params.directory or "")
+        project = await asyncio.to_thread(
+            service.build_project,
+            root, params.name, params.description, params.subpath,
+        )
+        confirmed = await _confirm_local(ctx, project, root, params.subpath)
+        if not isinstance(confirmed, Project):
+            return confirmed
+        project = confirmed
+        result = await service.index_project(project, app, on_progress)
+
     register_project_resource(ctx.mcp_server, project)
     await notify_resources_changed(ctx)
     return Indexed(
@@ -146,6 +180,11 @@ async def index_project(
         relations=result.relations,
         embedded=result.embedded,
         resolver_status=result.resolver_status,
+        reused=result.reused,
+        deleted=result.deleted,
+        unresolved=result.unresolved,
+        ref=result.ref,
+        changes=result.changes,
     )
 
 
@@ -153,35 +192,6 @@ async def list_projects(ctx: Context[AppContext]) -> list[Project]:
     """List every indexed project: id, name, path, git url, description."""
     app = ctx.request_context.lifespan_context
     return await service.list_projects(app.registry)
-
-
-async def refresh_project(
-    params: RefreshProjectParams,
-    ctx: Context[AppContext],
-) -> RefreshProjectResult:
-    """Re-index an already-registered project from its stored path.
-
-    Picks up file edits since the last index. Reports progress as it works.
-    """
-    app = ctx.request_context.lifespan_context
-
-    async def on_progress(done: float, total: float, message: str) -> None:
-        await ctx.report_progress(done, total, message)
-
-    result = await service.refresh_project(
-        app.graph_store, app.vector_store, app.registry, params.project,
-        on_progress,
-    )
-    if result is None:
-        return ProjectNotFound(project=params.project)
-    return Refreshed(
-        project=params.project,
-        files=result.files,
-        nodes=result.nodes,
-        relations=result.relations,
-        embedded=result.embedded,
-        resolver_status=result.resolver_status,
-    )
 
 
 async def remove_project(
