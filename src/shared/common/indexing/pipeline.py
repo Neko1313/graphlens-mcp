@@ -1,20 +1,21 @@
 import asyncio
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from graphlens import (
     GraphLens,
     LanguageAdapter,
     Node,
-    Relation,
     adapter_registry,
 )
+from graphlens.metrics import RESOLVER_METRICS_KEY
 from graphlens.models.graph import RESOLVER_STATUS_KEY
 
+from entities.commit import CommitInfo
 from shared.common.db.graph import GraphStore
 from shared.common.db.vector import VectorStore
-from shared.common.indexing import persist
+from shared.common.indexing import persist, temporal
 from shared.common.indexing.embed import (
     EMBED_DIM,
     EMBED_KINDS,
@@ -22,10 +23,12 @@ from shared.common.indexing.embed import (
     encode,
 )
 from shared.common.indexing.result import IndexResult, ProgressCallback
+from shared.common.setting.const import CODE_COLLECTION
 
 __all__ = ["index_project_graph"]
 
 _EMBED_BATCH = 256
+_VECTOR_BATCH = 200
 
 
 def _batched(items: list[Any], size: int) -> Iterator[list[Any]]:
@@ -60,32 +63,35 @@ def _discover(root: Path) -> list[tuple[str, LanguageAdapter]]:
     return languages
 
 
-def _under(file: Path, roots: list[Path]) -> bool:
-    resolved = file.resolve()
-    return any(resolved.is_relative_to(sub) for sub in roots)
-
-
 def _collect_files(
     root: Path,
     adapter: LanguageAdapter,
-    subpaths: list[str] | None,
+    subpath: str,
 ) -> list[Path]:
     files = adapter.collect_files(root)
-    if not subpaths:
+    if not subpath:
         return files
-    roots = [(root / sub).resolve() for sub in subpaths]
-    return [f for f in files if _under(f, roots)]
+    sub_root = (root / subpath).resolve()
+    return [f for f in files if f.resolve().is_relative_to(sub_root)]
 
 
 def _count_files(
     root: Path,
     languages: list[tuple[str, LanguageAdapter]],
-    subpaths: list[str] | None,
+    subpath: str,
 ) -> int:
     return sum(
-        len(_collect_files(root, adapter, subpaths))
+        len(_collect_files(root, adapter, subpath))
         for _, adapter in languages
     )
+
+
+def _unresolved_count(graph: GraphLens) -> int:
+    metrics = graph.metadata.get(RESOLVER_METRICS_KEY)
+    if not isinstance(metrics, dict):
+        return 0
+    raw = cast("dict[str, Any]", metrics).get("unresolved", 0)
+    return int(raw) if isinstance(raw, (int, float)) else 0
 
 
 async def _analyze(
@@ -93,22 +99,26 @@ async def _analyze(
     languages: list[tuple[str, LanguageAdapter]],
     total: int,
     on_progress: ProgressCallback | None,
-    subpaths: list[str] | None,
-) -> tuple[GraphLens | None, dict[str, str]]:
+    subpath: str,
+) -> tuple[GraphLens | None, dict[str, str], int]:
     graph: GraphLens | None = None
     resolver_status: dict[str, str] = {}
+    # Summed per-language before merge: merge's metadata.update overwrites the
+    # metrics key, so the last language would otherwise win.
+    unresolved = 0
     for lang, adapter in languages:
         await _report(on_progress, 0, total, f"Analyzing {lang}…")
-        files = _collect_files(root, adapter, subpaths) if subpaths else None
+        files = _collect_files(root, adapter, subpath) if subpath else None
         lang_graph = await asyncio.to_thread(adapter.analyze, root, files)
         resolver_status[lang] = str(
             lang_graph.metadata.get(RESOLVER_STATUS_KEY, "unknown"),
         )
+        unresolved += _unresolved_count(lang_graph)
         if graph is None:
             graph = lang_graph
         else:
             graph.merge(lang_graph, allow_shared=True)
-    return graph, resolver_status
+    return graph, resolver_status, unresolved
 
 
 def _encode_chunk(root: Path, chunk: list[Node]) -> list[list[float]]:
@@ -141,15 +151,15 @@ async def _prepare_embeddings(
     return pairs
 
 
-async def _persist_graph(
+async def _persist_touched(
     root: Path,
     graph_store: GraphStore,
     project_id: str,
     nodes: list[Node],
-    relations: list[Relation],
     total: int,
     on_progress: ProgressCallback | None,
-) -> int:
+) -> None:
+    """Upsert the added/changed nodes, reporting progress per file."""
     by_file = _group_by_file(root, nodes)
     n_files = max(len(by_file), 1)
     for index, (file_path, file_nodes) in enumerate(by_file.items(), start=1):
@@ -158,10 +168,20 @@ async def _persist_graph(
             on_progress, round(index / n_files * total), total,
             f"Indexed {file_path or '<no file>'}",
         )
-    valid_ids = {node.id for node in nodes}
-    return await persist.persist_relations(
-        graph_store, project_id, relations, valid_ids,
-    )
+
+
+async def _delete_vectors(
+    vector_store: VectorStore,
+    project_id: str,
+    local_ids: list[str],
+) -> None:
+    """Delete vectors for removed nodes (a no-op for non-embeddable ones)."""
+    gids = [persist.gid(project_id, lid) for lid in local_ids]
+    for start in range(0, len(gids), _VECTOR_BATCH):
+        chunk = gids[start : start + _VECTOR_BATCH]
+        await vector_store.delete(
+            CODE_COLLECTION, persist.vector_ids_filter(chunk),
+        )
 
 
 async def _store_vectors(
@@ -176,16 +196,17 @@ async def _store_vectors(
     for chunk in _batched(pairs, _EMBED_BATCH):
         rows = [
             {
-                "id": node.id,
+                "id": persist.gid(project_id, node.id),
                 "vector": vector,
                 "project_id": project_id,
+                "local_id": node.id,
                 "kind": node.kind.value,
                 "name": node.name,
                 "file_path": persist.norm_path(root, node.file_path) or "",
             }
             for node, vector in chunk
         ]
-        await vector_store.upsert(project_id, rows)
+        await vector_store.upsert(CODE_COLLECTION, rows)
         embedded += len(rows)
         await _report(
             on_progress, total, total, f"Stored {embedded} embeddings…",
@@ -199,17 +220,22 @@ async def index_project_graph(
     graph_store: GraphStore,
     vector_store: VectorStore,
     on_progress: ProgressCallback | None = None,
-    subpaths: list[str] | None = None,
+    subpath: str = "",
+    commit: CommitInfo | None = None,
 ) -> IndexResult:
     """Analyze a project with graphlens and persist the graph + embeddings.
 
-    graphlens has no per-file parse hook, so progress is reported at the
-    granularity we can honor: files discovered, per-language analysis,
-    embedding prep, then per-file persistence. Writes are batched (one UNWIND
-    per chunk) so real repos index in seconds. Analysis and embedding run
-    before any destructive write, so a failure there leaves an existing index
-    intact; re-indexing the same ``project_id`` is then idempotent.
-    ``subpaths`` restricts indexing to those subdirectories (monorepo scope).
+    Incremental by diff, not by wiping and rebuilding: graphlens can't resolve
+    cross-file edges from a file subset, so the whole project is re-analyzed
+    (which re-resolves every edge — the blast radius comes for free), but only
+    the delta is written. Nodes whose ``content_hash`` is unchanged skip both
+    the graph write and the (dominant-cost) re-embedding; added/changed nodes
+    are upserted and re-embedded; vanished nodes and their vectors are deleted;
+    edges are replaced wholesale (they carry no embedding cost). Analysis and
+    embedding run before any destructive write, so a failure leaves the prior
+    index intact. ``subpath`` restricts indexing to that subdirectory (``""`` =
+    whole repo). Graph nodes and vectors share one store/collection, scoped by
+    the ``project_id`` filter.
     """
     languages = await asyncio.to_thread(_discover, root)
     if not languages:
@@ -218,7 +244,7 @@ async def index_project_graph(
 
     lang_names = [lang for lang, _ in languages]
     file_total = await asyncio.to_thread(
-        _count_files, root, languages, subpaths,
+        _count_files, root, languages, subpath,
     )
     total = max(file_total, 1)
     await _report(
@@ -226,25 +252,72 @@ async def index_project_graph(
         f"Found {file_total} files ({', '.join(lang_names)})",
     )
 
-    graph, resolver_status = await _analyze(
-        root, languages, total, on_progress, subpaths,
+    graph, resolver_status, unresolved = await _analyze(
+        root, languages, total, on_progress, subpath,
     )
     nodes = list(graph.nodes.values()) if graph is not None else []
     relations = graph.relations if graph is not None else []
 
-    pairs = await _prepare_embeddings(root, nodes, total, on_progress)
-
     await persist.ensure_code_schema(graph_store)
-    await vector_store.ensure_collection(project_id, EMBED_DIM)
-    await persist.clear_project(graph_store, project_id)
-    await vector_store.delete(project_id, f'project_id == "{project_id}"')
+    await vector_store.ensure_collection(CODE_COLLECTION, EMBED_DIM)
 
-    rel_count = await _persist_graph(
-        root, graph_store, project_id, nodes, relations, total, on_progress,
-    )
+    # Diff the fresh graph against what's stored: touch only what changed.
+    # Drop the file-line cache first so no stale entry survives across runs.
+    persist.reset_source_cache()
+    stored = await persist.stored_node_hashes(graph_store, project_id)
+    new_by_id = {node.id: node for node in nodes}
+    new_hash = {
+        nid: persist.content_hash(root, node)
+        for nid, node in new_by_id.items()
+    }
+    touched = [
+        node
+        for nid, node in new_by_id.items()
+        if stored.get(nid) != new_hash[nid]
+    ]
+    removed = [lid for lid in stored if lid not in new_by_id]
+
+    # Embed the touched nodes before any destructive write.
+    pairs = await _prepare_embeddings(root, touched, total, on_progress)
+
+    # Vectors first, graph second: the stored content_hash is the diff
+    # baseline, so it must be the LAST thing written. A failure then leaves the
+    # baseline stale and the next index re-touches (idempotent upsert/delete),
+    # which self-heals — writing the hash first would strand the vector.
+    if removed:
+        await _delete_vectors(vector_store, project_id, removed)
     embedded = await _store_vectors(
         project_id, root, pairs, vector_store, total, on_progress,
     )
+
+    await _persist_touched(
+        root, graph_store, project_id, touched, total, on_progress,
+    )
+    if removed:
+        await persist.delete_nodes(graph_store, project_id, removed)
+    await persist.clear_relations(graph_store, project_id)
+    rel_count = await persist.persist_relations(
+        graph_store, project_id, relations, set(new_by_id),
+    )
+
+    # Record the graph head right after the graph body (and before temporal),
+    # so it can only ever claim a sha the graph already reflects: a temporal
+    # failure then can't leave graph_head lagging the body and mis-firing the
+    # remote_head no-op.
+    if commit is not None:
+        await persist.set_graph_head(graph_store, project_id, commit.sha)
+
+    embeddable_total = sum(
+        1 for node in nodes
+        if node.kind.value in EMBED_KINDS and node.file_path
+    )
+
+    changes = None
+    if commit is not None:
+        await temporal.ensure_temporal_schema(graph_store)
+        changes = await temporal.append_versions(
+            graph_store, root, project_id, commit, nodes,
+        )
 
     await _report(on_progress, total, total, "Done")
     return IndexResult(
@@ -254,4 +327,9 @@ async def index_project_graph(
         relations=rel_count,
         embedded=embedded,
         resolver_status=resolver_status,
+        reused=embeddable_total - embedded,
+        deleted=len(removed),
+        unresolved=unresolved,
+        ref=commit.ref if commit is not None else None,
+        changes=changes,
     )
