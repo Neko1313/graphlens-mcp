@@ -16,8 +16,18 @@ class Project(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str
-    """Stable, path-derived identifier — also the vector collection name."""
+    """Stable identity = ``hash(git remote + subpath)``.
+
+    Doubles as the isolation key: the ``project_id`` scalar filtered on every
+    graph and vector read/write. Not path-derived — two clones of the same
+    repo+subpath share it.
+    """
     name: str
     path: Path
+    subpath: str = ""
+    """The indexed subdirectory within the repo (``""`` = the whole repo).
+
+    Part of the identity, and the scope re-index restricts to.
+    """
     description: str | None = None
     git_url: str | None = None

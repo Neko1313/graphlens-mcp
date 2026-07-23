@@ -9,7 +9,7 @@ codebase's structure, usage, or impact.
 Answer from the graph, not from guesses. Reach for search / relations / info
 before grep or opening files: search finds symbols by meaning or name,
 relations gives callers/callees, info reads a symbol's source or a file's
-outline. Index a project first with index_project.
+outline. Index a project first with index.
 </investigate_before_answering>
 
 <trust_the_results>

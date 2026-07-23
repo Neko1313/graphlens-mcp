@@ -24,7 +24,7 @@ async def search(params: SearchParams) -> list[TextContent | ResourceLink]:
     ``concise`` returns each hit's signature plus a link to its resource
     (follow it for the full source); ``detailed`` inlines the source.
     ``exhaustive`` lists every in-scope file path instead. Does NOT index —
-    run ``index_project`` first.
+    run ``index`` first.
     """
     graph_store = get_graph_store()
     registry = get_registry_store()

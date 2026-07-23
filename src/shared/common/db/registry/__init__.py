@@ -39,7 +39,7 @@ async def resolve_project(
     if len(projects) == 1:
         return projects[0].id
     if not projects:
-        msg = "no projects indexed yet; run index_project first"
+        msg = "no projects indexed yet; run index first"
         raise ValueError(msg)
     ids = ", ".join(p.id for p in projects)
     msg = f"multiple projects indexed; pass project= one of: {ids}"

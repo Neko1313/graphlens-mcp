@@ -6,7 +6,9 @@ __all__ = ["VectorStore"]
 class VectorStore(Protocol):
     """An embeddings store — Milvus Lite (embedded) or full Milvus (host).
 
-    Both run through the same client, one collection per project. Rows and
+    Both run through the same client. One shared collection holds every
+    project's points; a ``project_id`` scalar on each point scopes reads and
+    deletes (isolation is a filter, not a per-project collection). Rows and
     hits are plain dicts (id, vector/score, payload) — never a driver type.
     """
 

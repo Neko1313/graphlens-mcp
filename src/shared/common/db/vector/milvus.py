@@ -57,7 +57,10 @@ class MilvusVectorStore:
                 dimension=dim,
                 primary_field_name="id",
                 id_type="string",
-                max_length=512,
+                # The primary key is the project-namespaced gid
+                # (project_id + "::" + node id), so leave generous headroom
+                # over a bare node id.
+                max_length=1024,
                 vector_field_name="vector",
                 metric_type="COSINE",
             )

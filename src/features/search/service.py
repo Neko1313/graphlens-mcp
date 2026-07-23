@@ -11,6 +11,8 @@ from shared.common.db.graph import GraphStore
 from shared.common.db.registry import ProjectRegistry
 from shared.common.db.vector import VectorStore
 from shared.common.indexing.embed import encode
+from shared.common.indexing.persist import vector_project_filter
+from shared.common.setting.const import CODE_COLLECTION
 
 __all__ = ["get_node_source", "search"]
 
@@ -210,19 +212,30 @@ async def search(  # noqa: PLR0913, PLR0912 - query tool knobs + blend passes
     hits: list[SearchHit] = []
     seen: set[str] = set()
 
-    filter_expr = _glob_prefix_filter(path_glob) if path_glob else None
-    over_fetch = limit if filter_expr or not path_glob else limit * 10
+    glob_filter = _glob_prefix_filter(path_glob) if path_glob else None
+    filters = [vector_project_filter(project_id)]
+    if glob_filter:
+        filters.append(glob_filter)
+    filter_expr = " and ".join(filters)
+    # The project scope is always pushed into the filter; over-fetch only when
+    # a glob is set but couldn't be (it's post-filtered by _in_scope below).
+    need_postfilter = bool(path_glob) and glob_filter is None
+    over_fetch = limit * 10 if need_postfilter else limit
     raw = await vector_store.search(
-        project_id, encode([query])[0].tolist(),
+        CODE_COLLECTION, encode([query])[0].tolist(),
         limit=max(over_fetch, limit),
         filter_expr=filter_expr,
-        output_fields=["name", "kind", "file_path"],
+        output_fields=["name", "kind", "file_path", "local_id"],
     )
     for hit in raw:
         entity = hit.get("entity", {})
         file_path = entity.get("file_path") or ""
-        node_id = hit["id"]
-        if node_id in seen or not _in_scope(file_path, path_glob):
+        node_id = entity.get("local_id") or ""
+        if (
+            not node_id
+            or node_id in seen
+            or not _in_scope(file_path, path_glob)
+        ):
             continue
         seen.add(node_id)
         hits.append(
@@ -239,7 +252,7 @@ async def search(  # noqa: PLR0913, PLR0912 - query tool knobs + blend passes
     if len(hits) < limit:
         rows = await graph_store.execute(
             "MATCH (n:CodeNode {project_id: $p}) "
-            "WHERE contains(lower(n.name), lower($q)) "
+            "WHERE toLower(n.name) CONTAINS toLower($q) "
             "RETURN n.local_id AS id, n.name AS name, n.kind AS kind, "
             "n.file_path AS file_path LIMIT $lim",
             {"p": project_id, "q": query, "lim": (limit - len(hits)) * 3},
@@ -272,12 +285,48 @@ async def search(  # noqa: PLR0913, PLR0912 - query tool knobs + blend passes
             if len(hits) >= limit:
                 break
 
-    signatures = await _signatures(
-        graph_store, registry, project_id, [h.id for h in hits if h.id],
+    return await _finalize_hits(graph_store, registry, project_id, hits)
+
+
+async def _existing_local_ids(
+    graph_store: GraphStore,
+    project_id: str,
+    ids: list[str],
+) -> set[str]:
+    """Which of ``ids`` still resolve to a CodeNode in the project."""
+    if not ids:
+        return set()
+    rows = await graph_store.execute(
+        "MATCH (n:CodeNode {project_id: $p}) WHERE n.local_id IN $ids "
+        "RETURN n.local_id AS id",
+        {"p": project_id, "ids": ids},
     )
-    for hit in hits:
+    return {row["id"] for row in rows}
+
+
+async def _finalize_hits(
+    graph_store: GraphStore,
+    registry: ProjectRegistry,
+    project_id: str,
+    hits: list[SearchHit],
+) -> list[SearchHit]:
+    """Drop phantom hits and attach signatures.
+
+    A vector can outlive its graph node (a crash between the vector write and
+    the graph write, then the symbol is deleted), so a semantic hit whose id no
+    longer resolves to a CodeNode would surface a stale result with a dead
+    resource link — those are filtered out before signatures are read.
+    """
+    live = await _existing_local_ids(
+        graph_store, project_id, [h.id for h in hits if h.id],
+    )
+    kept = [h for h in hits if not h.id or h.id in live]
+    signatures = await _signatures(
+        graph_store, registry, project_id, [h.id for h in kept if h.id],
+    )
+    for hit in kept:
         hit.signature = signatures.get(hit.id, "")
-    return hits
+    return kept
 
 
 async def get_node_source(
