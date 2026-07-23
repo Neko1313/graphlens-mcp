@@ -42,9 +42,9 @@ questions reliably.
 That foundation is the [`graphlens`](https://github.com/Neko1313/graphlens) engine —
 parsing, stable node identity, and the resolvers. **`graphlens-mcp` is a smart, agent-facing
 layer over it**, and — honestly — a worked example of how to *use* the engine: it persists
-the graph (so the whole thing isn't held in memory), adds a semantic + clustering layer on
-top, keeps it fresh as you edit, and exposes it to agents as navigation tools plus a bundled
-skill. From that example it is growing into a **self-sufficient system** — one that, measured
+the graph (so the whole thing isn't held in memory), adds a semantic search layer on top,
+re-indexes incrementally on demand, and exposes it to agents as navigation tools plus
+workflow prompts. From that example it is growing into a **self-sufficient system** — one that, measured
 against the market's giants, aims for **stable, reproducible** results: better in some places,
 worse in others, but honest about which (see [How it compares](#how-it-compares)).
 
@@ -93,36 +93,48 @@ uv tool install graphlens-mcp      # or: pipx install graphlens-mcp
 Python language analysis works out of the box (the `ty` type engine ships as a
 dependency). Other languages parse immediately and unlock full cross-file semantics once
 their toolchain is present (Node for TypeScript, the Go toolchain, etc.); without it that
-language is reported as `degraded` rather than blocking `init`.
+language is reported as `degraded` rather than blocking indexing.
 
-## Quickstart (two commands)
+The hosted graph/vector backends (Neo4j) are an optional extra — only for the multi-tenant
+server mode: `uv tool install "graphlens-mcp[neo4j]"`.
 
-```bash
-uv tool install graphlens-mcp        # 1. install
-cd your-project && graphlens-mcp init  # 2. index + configure your agent
+## Quickstart
+
+`graphlens-mcp` is an MCP server your **agent launches** — you don't run it yourself. Point
+your MCP client at it over stdio:
+
+```jsonc
+// e.g. Claude Code / Cursor MCP config
+{ "mcpServers": { "graphlens": { "command": "graphlens-mcp" } } }
 ```
 
-`init` detects the project's languages, indexes the code into a local graph, writes the
-MCP server entry into your agent's config and installs the navigation skill. You do **not**
-run `serve` yourself — your agent launches it from the config. Restart the agent and ask
-it something like *"what breaks if I change the signature of `create_order`?"*.
+Then, from your agent:
 
-## Commands
+1. **`index`** the project — a git repo **with a remote** (identity is derived from the
+   remote, so the same repo maps to one project across clones and CI). Re-running `index`
+   refreshes it in place; only the changed symbols are re-embedded.
+2. Ask structural questions — *"what breaks if I change the signature of `create_order`?"* —
+   and the agent answers from the graph via **`search` / `relations` / `info`** (and the
+   `/impact`, `/trace`, `/deadcode`, … prompts) instead of grepping.
 
-| Command | What it does |
+## Running the server
+
+| Invocation | Mode |
 |---|---|
-| `graphlens-mcp init` | Detect languages → toolchain doctor → full index → configure agents → install skill |
-| `graphlens-mcp serve` | Start the MCP server over stdio. **Launched by the agent**, not by you |
-| `graphlens-mcp status` | Show detected languages, toolchain status, and graph size/freshness |
-| `graphlens-mcp reindex` | Force a full rebuild (e.g. after installing a new toolchain) |
-| `graphlens-mcp remove` | Deregister from agents and (with `--purge-db`) delete the local graph |
+| `graphlens-mcp` | **stdio** — the local default; your agent spawns it |
+| `graphlens-mcp --http --host 0.0.0.0 --port 8000` | **Streamable HTTP** — for a hosted deployment |
 
-Useful `init` flags: `--root <dir>`, `--agent claude_code --agent cursor` (repeatable),
-`--no-agent`, `--no-skills`, `--db <path>`.
+Project management is done through MCP **tools**, not subcommands: **`index`** (add or
+refresh — a local `directory` or a remote `repo_url` to clone), **`list_projects`**, and
+**`remove_project`**.
 
-The graph lives at `<project>/.graphlens/graph.db` (SQLite). It is a regenerable cache —
-safe to delete; `reindex` rebuilds it. Add `.graphlens/` to your VCS ignore (the bundled
-`init` flow assumes it is not committed).
+## Storage
+
+Local mode keeps everything embedded — a **Kuzu** code graph and a **Milvus Lite** vector
+index — under the platform data directory (e.g. `~/.local/share/graphlens-mcp/`), alongside a
+small project registry. It is a regenerable cache: safe to delete, and re-running `index`
+rebuilds it. The server mode swaps these for hosted **Neo4j** + **Milvus** behind the same
+code (see [Server deployment](#server-deployment)).
 
 ## Supported languages
 
@@ -134,16 +146,15 @@ safe to delete; `reindex` rebuilds it. Add `.graphlens/` to your VCS ignore (the
 | Rust | SCIP / rust-analyzer | `degraded` without toolchain |
 | PHP | PHP parser | `degraded` without toolchain |
 
-`graphlens-mcp status` reports the actual resolver status per language. When a toolchain is
-missing, that language is reported as **degraded** (parsed structure, calls/types not fully
-resolved) with an install hint — it never blocks `init`.
+Every `index` result reports the resolver status per language. When a toolchain is missing,
+that language is reported as **degraded** (parsed structure, calls/types not fully resolved)
+rather than blocking indexing.
 
 ## Agent tools
 
-Three tools — everything a symbol or file needs comes back as a navigable graph **node**,
-not a dead grep line. Each response carries a graph-quality status (`ok` | `degraded`) so the
-agent never mistakes a partial answer for a complete one, plus an `indexing` flag (`true`
-when a background reindex is running, so edges may be temporarily incomplete).
+Three **query** tools — everything a symbol or file needs comes back as a navigable graph
+**node**, not a dead grep line. Each response carries a graph-quality status (`ok` |
+`degraded`) so the agent never mistakes a partial answer for a complete one.
 
 | Tool | Purpose |
 |---|---|
@@ -158,47 +169,67 @@ relevance via a small bundled embedding model, not just truncated) and surface t
 of 22" instead of guessing. If the embedding model can't be fetched (e.g. a first run with no
 network), search transparently falls back to name/content matching.
 
-## Freshness model
+Three **management** tools — `index` (add or refresh a project), `list_projects`, and
+`remove_project` — round out the surface, plus six **workflow prompts** (`/impact`, `/find`,
+`/trace`, `/map`, `/xflow`, `/deadcode`) that drive the query tools through a fixed method so
+the agent doesn't have to improvise one.
 
-A single mechanism keeps the graph current: a **filesystem watcher** (`serve` starts it by
-default; disable with `--no-watch`). When a file changes on disk the server re-indexes the
-**connected set** — the changed file plus the files that import it and the files it imports —
-with one full analyze, so cross-file edges are rebuilt correctly rather than left partial.
-Deleting a file prunes its symbols and refreshes its importers. There is no polling and no
-structure-only "skeleton" phase: every (re)index produces the full graph the resolver can
-give. As a backstop, a tool that touches a file the watcher hasn't processed yet triggers the
-same connected re-index on access.
+## Indexing & freshness
 
-Files created, deleted or edited *while the server was down* are invisible to an event-based
-watcher, so `serve` runs a one-shot **reconcile** at startup: it scans the project, indexes
-new files, prunes vanished ones, and refreshes any that changed — then hands off to the
-watcher.
+Indexing is **on demand** — the agent (or CI) calls `index`; there is no filesystem watcher.
+Every run does one **full analyze** of the project, so cross-file edges are resolved
+correctly rather than left partial, and then writes only the **delta** against what's stored:
+unchanged symbols keep their graph row and embedding, changed ones are re-analyzed and
+re-embedded, and vanished ones are pruned (from the graph *and* the vector index). Re-running
+`index` after edits is therefore cheap — the dominant cost, re-embedding, is paid only for
+what actually changed, and the server can skip a clone entirely when the remote HEAD is
+already the last-indexed commit.
+
+Each index run is also recorded in an append-only **temporal log** keyed by the commit it
+captured, so a ref's history is retained for future time-travel / branch-diff reads (the
+query side of that is still landing).
+
+## Server deployment
+
+The same binary serves the local zero-infra case and a multi-tenant deployment; only the
+backends and auth differ, and both sit behind the same ports:
+
+- **Backends by DSN.** Set `DB__GRAPH` to a `neo4j://` DSN (and `DB__VECTOR` to a Milvus
+  host) to swap the embedded stores for hosted **Neo4j** + **Milvus** — no code change. The
+  Neo4j backend applies a thin Cypher dialect shim; every non-trivial query is verified
+  against a real Neo4j in the test suite. Unset, it stays on embedded Kuzu + Milvus Lite.
+- **Write / index auth is the git token.** `index(repo_url, ref, ci_token)` clones over the
+  token; no valid token → no clone → nothing written, so the token *is* the write ACL. The
+  clone is hardened: the token travels via `GIT_ASKPASS` (never the URL, argv, or
+  `.git/config`), transports are allow-listed (no `ext::` command execution), and the
+  checkout lands in a per-uid `0700` directory.
+- **Read auth is an external gateway.** Reads are not checked by the server; front it with an
+  OIDC gateway (e.g. Casdoor). The server keeps no session state.
+
+Run the hosted server with `graphlens-mcp --http`.
 
 ## Known limitations
 
-- **Connected-set re-link, deep ripples:** the watcher re-links the *connected set* of a
-  change (the changed file plus its direct importers and imports), not the entire project. A
-  rename that ripples through many indirection layers may need a full `reindex` for an exact
-  graph. Creating a file that an *unchanged* file already imports is handled — a second
-  importer pass re-links that importer once the new file is indexed.
-- **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
-  re-synthesized for every boundary a re-indexed file touches, so a new or moved
-  exposer/consumer is linked without a full `reindex`. A change that leaves a boundary
-  entirely (a file that stops exposing an endpoint others still consume) may still need a
-  full `reindex` for an exact cross-language view; the boundary-based query resolves
-  connections regardless.
+> Status: early — the runtime is being rebuilt on the MCP 2.0 SDK. The core index/query/
+> incremental paths work; a few edges are still landing.
 
-## Uninstall
-
-`graphlens-mcp remove` deregisters the server from your agents; add `--purge-db` to also
-delete the local `.graphlens/` cache.
+- **A git remote is required.** Project identity is `hash(remote + subpath)`, so an un-pushed
+  or non-git directory is not indexable — add a remote (or push) first.
+- **One snapshot per project, latest wins.** Identity is ref-independent, so indexing two
+  refs of one repo into the same project leaves the live graph reflecting whichever was
+  indexed last (the temporal log keeps both). Per-ref materialized views aren't wired up yet.
+- **Reads need the working tree.** `info` source and content search read files from disk; the
+  server retains a remote project's checkout for this, and local mode uses your own directory.
+- **Rebuild on upgrade.** The store is a cache with no schema migrations — after upgrading
+  across a schema change, delete the data directory and re-index rather than upgrading in
+  place.
 
 ## Development
 
 ```bash
-uv sync --all-groups   # install lint + test tooling
-task check             # ruff + format-check + ty + bandit + pytest (the CI gate)
-task docs:serve        # preview the docs site locally (needs Node + pnpm)
+uv sync --all-groups                          # lint + test tooling (add --extra neo4j for the parity tests)
+uv run ruff check . && uv run ty check src    # lint + types
+uv run pytest                                 # tests (the Neo4j parity tests skip without Docker)
 ```
 
 See the [Architecture](https://neko1313.github.io/graphlens-mcp/architecture) and
