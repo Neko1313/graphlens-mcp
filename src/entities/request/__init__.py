@@ -10,6 +10,17 @@ __all__ = [
     "SearchParams",
 ]
 
+# The two time-travel knobs, worded once so both tools describe them alike.
+HISTORY_REF = (
+    "Read history on this branch/ref instead of the live graph. Omit for the "
+    "current code. The project resource lists the refs indexed."
+)
+HISTORY_AT = (
+    "Read the project as of this point: a commit sha (a unique prefix is "
+    "enough) or a seq from the project's history. Omit for the ref's newest "
+    "indexed commit."
+)
+
 
 class InfoParams(BaseModel):
     """Arguments for the ``info`` tool."""
@@ -39,6 +50,16 @@ class InfoParams(BaseModel):
     file: str = Field(
         default="",
         description="Disambiguates an ambiguous symbol name by its file.",
+    )
+    ref: str = Field(
+        default="",
+        description=HISTORY_REF,
+    )
+    at: str = Field(
+        default="",
+        description=HISTORY_AT + " Source text is not stored per revision, so "
+        "a past revision returns the symbol's recorded metadata without its "
+        "body.",
     )
 
 
@@ -70,6 +91,15 @@ class RelationsParams(BaseModel):
     file: str = Field(
         default="",
         description="Disambiguates an ambiguous symbol name by its file.",
+    )
+    ref: str = Field(
+        default="",
+        description=HISTORY_REF,
+    )
+    at: str = Field(
+        default="",
+        description=HISTORY_AT + " Neighbours are then the ones recorded at "
+        "that point, not today's.",
     )
 
 

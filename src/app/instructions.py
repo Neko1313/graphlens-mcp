@@ -25,6 +25,17 @@ a symbol), or simply the current subject of the conversation:
   completeness caveat below).
 </workflows>
 
+<time_travel>
+info and relations take `ref` and `at` to answer from an indexed commit
+instead of now — `at` is a commit sha (a short prefix is fine) or a seq; the
+project resource lists every ref and commit available. Use it for "when did
+this call disappear", "who called X before the refactor", "did this symbol
+exist at release-1.2". Only the graph is versioned: a past revision gives a
+symbol's recorded shape and its neighbours of the day, but NOT its source
+text, and search is always current. The result carries a `revision` block
+saying which point answered it.
+</time_travel>
+
 <trust_the_results>
 Results are handles from a real parse, not text matches — trust them, don't
 re-verify with grep. `*_total` is the true neighbour count; a bigger `limit`

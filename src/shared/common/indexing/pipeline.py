@@ -295,7 +295,7 @@ async def index_project_graph(
     if commit is not None:
         await temporal.ensure_temporal_schema(graph_store)
         changes = await temporal.append_versions(
-            graph_store, root, project_id, commit, nodes,
+            graph_store, root, project_id, commit, nodes, relations,
         )
 
     await _report(on_progress, total, total, "Done")

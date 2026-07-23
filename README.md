@@ -162,6 +162,9 @@ Three **query** tools — everything a symbol or file needs comes back as a navi
 | `relations` | A symbol's neighbourhood in one call: callers, callees, implementors/subclasses, and non-call references — each with its signature. **The** impact-analysis tool ("what breaks if I change X?", "what implements X?") |
 | `info` | Read a specific target: a symbol (node id or name) → source + signature + location; a file path → its symbol outline |
 
+`relations` and `info` also take `ref`/`at` to answer from a past commit instead of the
+current code — see [History](#history).
+
 `search` and `relations` accept either a symbol **name** or a node id directly — you don't
 need to look up a node id first. Both cap their response size (a large hit set is ranked by
 relevance via a small bundled embedding model, not just truncated) and surface true counts
@@ -185,9 +188,28 @@ re-embedded, and vanished ones are pruned (from the graph *and* the vector index
 what actually changed, and the server can skip a clone entirely when the remote HEAD is
 already the last-indexed commit.
 
-Each index run is also recorded in an append-only **temporal log** keyed by the commit it
-captured, so a ref's history is retained for future time-travel / branch-diff reads (the
-query side of that is still landing).
+## History
+
+Each index run is also recorded in an append-only **temporal log**, keyed by the commit it
+captured. Symbols *and* edges are versioned, so a past point in time answers what existed
+**and** what called what — a node set without its edges of the day would only answer half
+the question.
+
+`info` and `relations` read it through two arguments:
+
+| Argument | Meaning |
+|---|---|
+| `ref` | Read history on this branch/ref instead of the live graph |
+| `at` | A commit sha (a unique prefix is enough) or a seq; omit for the ref's newest indexed commit |
+
+So `relations(symbol="parse", ref="main", at="9f2c1a")` answers *who called `parse` at that
+commit* — a call removed since is still there, one added later is not. Each project's
+resource lists every indexed ref and its commits, which is where those values come from.
+
+Two limits are deliberate: **source text is not versioned**, so a past revision returns a
+symbol's recorded shape (name, kind, file, span, metadata) without its body; and **search is
+always current**, because embeddings are stored only for the live graph. Historical results
+carry a `revision` block naming the point they came from and what it can't answer.
 
 ## Server deployment
 
@@ -217,9 +239,12 @@ Run the hosted server with `graphlens-mcp --http`.
   or non-git directory is not indexable — add a remote (or push) first.
 - **A project is a whole repository.** There is no partial-subtree indexing: one remote is
   exactly one project, and every indexable file under it is analyzed.
-- **One snapshot per project, latest wins.** Identity is ref-independent, so indexing two
-  refs of one repo into the same project leaves the live graph reflecting whichever was
-  indexed last (the temporal log keeps both). Per-ref materialized views aren't wired up yet.
+- **One live snapshot per project, latest wins.** Identity is ref-independent, so indexing
+  two refs of one repo leaves the *live* graph reflecting whichever was indexed last. The
+  temporal log keeps both, and `ref`/`at` read either — but there is no per-ref materialized
+  view, so the fast path always answers for the last-indexed ref.
+- **History covers structure, not text.** A past revision returns recorded symbol and edge
+  metadata; source bodies and search embeddings exist only for the live graph.
 - **Reads need the working tree.** `info` source and content search read files from disk; the
   server retains a remote project's checkout for this, and local mode uses your own directory.
 - **Rebuild on upgrade.** The store is a cache with no schema migrations — after upgrading

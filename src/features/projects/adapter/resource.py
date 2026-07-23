@@ -9,7 +9,9 @@ from mcp.server.mcpserver.resources.types import FunctionResource
 from entities.project import Project
 from features.projects import service
 from shared.common.context import AppContext
+from shared.common.db.graph import get_graph_store
 from shared.common.db.registry import get_registry_store
+from shared.common.indexing import temporal
 
 __all__ = [
     "hydrate_project_resources",
@@ -23,6 +25,32 @@ def _project_uri(project_id: str) -> str:
     return f"project://{project_id}"
 
 
+async def _history(project_id: str) -> list[dict[str, object]]:
+    """Each indexed ref with the commits recorded on it.
+
+    This is where the ``ref``/``at`` arguments of ``info`` and ``relations``
+    get their vocabulary: without it a caller has no way to know which points
+    in time are answerable.
+    """
+    graph_store = get_graph_store()
+    # A project indexed before the log existed (or with no commit captured)
+    # has no tables to read; creating them is idempotent and cheaper than
+    # guessing at each backend's "no such table" error.
+    await temporal.ensure_temporal_schema(graph_store)
+    refs = await temporal.list_refs(graph_store, project_id)
+    return [
+        {
+            "ref": ref["ref"],
+            "head_sha": ref["head_sha"],
+            "head_seq": ref["head_seq"],
+            "commits": await temporal.list_commits(
+                graph_store, project_id, str(ref["ref"]),
+            ),
+        }
+        for ref in refs
+    ]
+
+
 def _reader(
     project_id: str,
 ) -> Callable[[], Awaitable[dict[str, object]]]:
@@ -33,7 +61,9 @@ def _reader(
         if project is None:
             msg = f"unknown project: {project_id}"
             raise ResourceNotFoundError(msg)
-        return project.model_dump(mode="json")
+        payload = project.model_dump(mode="json")
+        payload["history"] = await _history(project_id)
+        return payload
 
     return read
 

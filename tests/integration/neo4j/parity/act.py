@@ -68,14 +68,16 @@ async def test_neo4j_runs_the_real_persist_and_query_surface(neo4j_store):
     )
     assert {row["id"] for row in reached} == {"b", "c"}
 
-    # the real temporal log + state_at aggregation on Neo4j.
+    # the real temporal log on Neo4j — including its explicit transaction,
+    # the node/edge diffs, and both state_at and edges_at aggregations.
     await temporal.append_versions(
         store, ROOT, PROJECT,
-        CommitInfo(ref="main", sha="s1", time_update=1), [_node("x", "x")],
+        CommitInfo(ref="main", sha="s1", time_update=1),
+        [_node("x", "x"), _node("y", "y")], [_rel("x", "y")],
     )
     await temporal.append_versions(
         store, ROOT, PROJECT,
-        CommitInfo(ref="main", sha="s2", time_update=2), [],
+        CommitInfo(ref="main", sha="s2", time_update=2), [], [],
     )
     live_at_1 = {
         row["node_id"]
@@ -85,5 +87,20 @@ async def test_neo4j_runs_the_real_persist_and_query_surface(neo4j_store):
         row["node_id"]
         for row in await temporal.state_at(store, PROJECT, "main", 2)
     }
-    assert live_at_1 == {"x"}
+    assert live_at_1 == {"x", "y"}
     assert live_at_2 == set()
+
+    edges_at_1 = await temporal.edges_at(
+        store, PROJECT, "main", 1, ["x"], "out", "calls",
+    )
+    edges_at_2 = await temporal.edges_at(
+        store, PROJECT, "main", 2, ["x"], "out", "calls",
+    )
+    assert {row["target_id"] for row in edges_at_1} == {"y"}
+    assert edges_at_2 == []
+
+    # and the ref/commit listing that resolve_point drives ref/at from.
+    point = await temporal.resolve_point(store, PROJECT, "main", "s1")
+    assert point is not None
+    assert point.seq == 1
+    assert not point.is_head

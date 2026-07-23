@@ -23,10 +23,33 @@ __all__ = [
     "RelationsResult",
     "RemoveProjectResult",
     "Removed",
+    "Revision",
     "SearchHit",
     "SearchResult",
     "Skipped",
 ]
+
+
+class Revision(BaseModel):
+    """Which point in history a result was answered from.
+
+    Present only on a time-travel read (``ref``/``at``); its absence means the
+    answer came from the live graph.
+    """
+
+    ref: str
+    seq: int
+    """The log's own index-order counter for the ref — not a git commit depth.
+
+    Usable verbatim as a later ``at`` value.
+    """
+    sha: str | None = None
+    time_update: int | None = None
+    """Committer timestamp (epoch seconds) of the commit at this point."""
+    is_head: bool = False
+    """Whether this is the newest indexed commit on the ref."""
+    note: str = ""
+    """What this point cannot answer — e.g. that source text isn't stored."""
 
 
 class NodeRef(BaseModel):
@@ -46,6 +69,7 @@ class NodeInfo(NodeRef):
     signature: str = ""
     source: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    revision: Revision | None = None
 
 
 class OutlineEntry(BaseModel):
@@ -65,6 +89,7 @@ class FileOutline(BaseModel):
     file_path: str
     symbols: list[OutlineEntry]
     importers: list[str] = Field(default_factory=list)
+    revision: Revision | None = None
 
 
 class FileSource(BaseModel):
@@ -113,6 +138,7 @@ class RelationsResult(BaseModel):
     implementors_total: int = 0
     references: list[NodeRef] = Field(default_factory=list)
     references_total: int = 0
+    revision: Revision | None = None
 
 
 RelationsLookup = Annotated[
