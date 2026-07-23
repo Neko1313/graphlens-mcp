@@ -12,6 +12,19 @@ relations gives callers/callees, info reads a symbol's source or a file's
 outline. Index a project first with index.
 </investigate_before_answering>
 
+<workflows>
+Standard playbooks — also invokable as slash-prompts (/impact, /find, /trace,
+/map, /xflow, /deadcode) but you can just follow them inline. The starting
+point may be a symbol name, a plain-language description (search resolves it to
+a symbol), or simply the current subject of the conversation:
+- Impact ("what breaks if I change X"): resolve X, then relations(depth=2);
+  size it by the *_total counts before reading individual callers.
+- Find ("where is the code that does X"): search(X), then info the top hit.
+- Trace a call path: resolve, then relations(kinds=calls) depth-first.
+- Dead code: relations; all *_total == 0 hints it may be removable (state the
+  completeness caveat below).
+</workflows>
+
 <trust_the_results>
 Results are handles from a real parse, not text matches — trust them, don't
 re-verify with grep. `*_total` is the true neighbour count; a bigger `limit`
