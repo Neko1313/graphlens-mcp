@@ -21,7 +21,6 @@ dependencies = [
     # milvus-lite 2.4.x imports pkg_resources at load time but only declares tqdm.
     # setuptools>=81 dropped pkg_resources, so cap below that to keep it available.
     "setuptools<81",
-    "questionary~=2.1.1",
 ]
 
 # Server-tier graph backend (k8s deployments), selected via GRAPHLENS_GRAPH_BACKEND=neo4j.
@@ -29,8 +28,8 @@ dependencies = [
 [project.optional-dependencies]
 neo4j = ["neo4j~=6.2.0"]
 
-#[project.scripts]
-#graphlens-mcp = "graphlens_mcp.cli:main"
+[project.scripts]
+graphlens-mcp = "app.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]
@@ -57,7 +56,9 @@ test = [
     "pytest-asyncio~=1.4.0",
     "pytest-cov~=7.1.0",
     "pytest-randomly~=4.1.0",
+    "pytest-timeout~=2.3",
     "pytest-xdist[psutil]~=3.8.0",
+    "testcontainers~=4.0",
 ]
 
 # ----------------------------------------------------------------------
@@ -74,17 +75,32 @@ skips = ["B608"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The layout names test files by scenario (act.py = happy paths, error.py =
+# errors/edges, plus descriptive files for complex cases) rather than test_*.py,
+# so widen collection to match them. Fixtures under tests/fixtures/** don't match
+# and are loaded via the pytest_plugins chain, not collected as tests.
+python_files = ["act.py", "error.py", "test_*.py", "*_test.py"]
+# importlib mode lets sibling act.py/error.py files coexist without __init__.py in
+# every test dir; pythonpath puts the repo root on sys.path so the tests.fixtures
+# plugin chain (registered in tests/conftest.py) imports.
+pythonpath = ["."]
 # A per-test ceiling so a single hang (e.g. a stalled DB worker) fails fast with a
 # traceback instead of stalling the whole run; integration analyze stays well under it.
-addopts = "-q --strict-markers --timeout=120"
+addopts = "-q --strict-markers --timeout=120 --import-mode=importlib"
 markers = [
-    "unit: pure tests, no external processes",
-    "integration: real graphlens analyze / filesystem / CLI",
-    "store: SqliteStore behavior",
-    "workspace: indexing & freshness",
-    "agents: agent registry (de)registration",
-    "cli: command-line interface",
-    "tools: MCP tool layer",
-    "golden: batch == incremental invariant",
-    "paths: path normalization",
+    # scope — exactly one per test
+    "unit: pure tests, no external processes or stores",
+    "integration: real embedded stores (Kuzu / Milvus Lite) or graphlens analyze",
+    # business entity / process — at least one per test
+    "project: project identity & management (index/refresh/remove/list)",
+    "indexing: the graphlens indexing pipeline",
+    "search: the search feature",
+    "relations: the relations feature",
+    "info: the info feature",
+    "registry: the project registry store",
+    "isolation: cross-project isolation invariants",
+    "temporal: append-only version log & state_at time-travel",
+    "tools: MCP tool adapter layer",
+    "golden: batch == incremental indexing invariant",
+    "neo4j: cross-engine parity against a real Neo4j (needs Docker)",
 ]
