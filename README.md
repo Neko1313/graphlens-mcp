@@ -213,8 +213,10 @@ Run the hosted server with `graphlens-mcp --http`.
 > Status: early — the runtime is being rebuilt on the MCP 2.0 SDK. The core index/query/
 > incremental paths work; a few edges are still landing.
 
-- **A git remote is required.** Project identity is `hash(remote + subpath)`, so an un-pushed
+- **A git remote is required.** Project identity is `hash(remote)`, so an un-pushed
   or non-git directory is not indexable — add a remote (or push) first.
+- **A project is a whole repository.** There is no partial-subtree indexing: one remote is
+  exactly one project, and every indexable file under it is analyzed.
 - **One snapshot per project, latest wins.** Identity is ref-independent, so indexing two
   refs of one repo into the same project leaves the live graph reflecting whichever was
   indexed last (the temporal log keeps both). Per-ref materialized views aren't wired up yet.

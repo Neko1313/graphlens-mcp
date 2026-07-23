@@ -63,27 +63,11 @@ def _discover(root: Path) -> list[tuple[str, LanguageAdapter]]:
     return languages
 
 
-def _collect_files(
-    root: Path,
-    adapter: LanguageAdapter,
-    subpath: str,
-) -> list[Path]:
-    files = adapter.collect_files(root)
-    if not subpath:
-        return files
-    sub_root = (root / subpath).resolve()
-    return [f for f in files if f.resolve().is_relative_to(sub_root)]
-
-
 def _count_files(
     root: Path,
     languages: list[tuple[str, LanguageAdapter]],
-    subpath: str,
 ) -> int:
-    return sum(
-        len(_collect_files(root, adapter, subpath))
-        for _, adapter in languages
-    )
+    return sum(len(adapter.collect_files(root)) for _, adapter in languages)
 
 
 def _unresolved_count(graph: GraphLens) -> int:
@@ -99,7 +83,6 @@ async def _analyze(
     languages: list[tuple[str, LanguageAdapter]],
     total: int,
     on_progress: ProgressCallback | None,
-    subpath: str,
 ) -> tuple[GraphLens | None, dict[str, str], int]:
     graph: GraphLens | None = None
     resolver_status: dict[str, str] = {}
@@ -108,8 +91,7 @@ async def _analyze(
     unresolved = 0
     for lang, adapter in languages:
         await _report(on_progress, 0, total, f"Analyzing {lang}…")
-        files = _collect_files(root, adapter, subpath) if subpath else None
-        lang_graph = await asyncio.to_thread(adapter.analyze, root, files)
+        lang_graph = await asyncio.to_thread(adapter.analyze, root, None)
         resolver_status[lang] = str(
             lang_graph.metadata.get(RESOLVER_STATUS_KEY, "unknown"),
         )
@@ -220,7 +202,6 @@ async def index_project_graph(
     graph_store: GraphStore,
     vector_store: VectorStore,
     on_progress: ProgressCallback | None = None,
-    subpath: str = "",
     commit: CommitInfo | None = None,
 ) -> IndexResult:
     """Analyze a project with graphlens and persist the graph + embeddings.
@@ -233,9 +214,9 @@ async def index_project_graph(
     are upserted and re-embedded; vanished nodes and their vectors are deleted;
     edges are replaced wholesale (they carry no embedding cost). Analysis and
     embedding run before any destructive write, so a failure leaves the prior
-    index intact. ``subpath`` restricts indexing to that subdirectory (``""`` =
-    whole repo). Graph nodes and vectors share one store/collection, scoped by
-    the ``project_id`` filter.
+    index intact. The whole repository under ``root`` is indexed. Graph nodes
+    and vectors share one store/collection, scoped by the ``project_id``
+    filter.
     """
     languages = await asyncio.to_thread(_discover, root)
     if not languages:
@@ -243,9 +224,7 @@ async def index_project_graph(
         raise ValueError(msg)
 
     lang_names = [lang for lang, _ in languages]
-    file_total = await asyncio.to_thread(
-        _count_files, root, languages, subpath,
-    )
+    file_total = await asyncio.to_thread(_count_files, root, languages)
     total = max(file_total, 1)
     await _report(
         on_progress, 0, total,
@@ -253,7 +232,7 @@ async def index_project_graph(
     )
 
     graph, resolver_status, unresolved = await _analyze(
-        root, languages, total, on_progress, subpath,
+        root, languages, total, on_progress,
     )
     nodes = list(graph.nodes.values()) if graph is not None else []
     relations = graph.relations if graph is not None else []

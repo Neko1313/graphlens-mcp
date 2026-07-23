@@ -22,7 +22,7 @@ async def test_index_remote_retains_a_readable_checkout(
 
     # Act
     project, result = await service.index_remote(
-        str(git_repo), "main", None, "", app,
+        str(git_repo), "main", None, app,
     )
 
     # Assert — the working tree the project points at still exists on disk.

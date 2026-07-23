@@ -116,8 +116,8 @@ class IndexParams(BaseModel):
     directory: str | None = Field(
         default=None,
         description="A local checkout to index. Must be a git repo with a "
-        "remote (identity is hash(remote + subpath)). Mutually exclusive with "
-        "repo_url.",
+        "remote (identity is hash(remote)); the whole repository is indexed. "
+        "Mutually exclusive with repo_url.",
     )
     repo_url: str | None = Field(
         default=None,
@@ -135,15 +135,9 @@ class IndexParams(BaseModel):
         description="Git token to clone a private repo_url. Sensitive — never "
         "logged. Ignored for a local directory.",
     )
-    subpath: str = Field(
-        default="",
-        description="Restrict indexing to this subdirectory (monorepo scope). "
-        "Each subpath is its own project (identity = repo + subpath), so "
-        "index several subtrees with several calls. Omit for the whole repo.",
-    )
     name: str | None = Field(
         default=None,
-        description="Project name; defaults to the repo/subpath name.",
+        description="Project name; defaults to the repository's name.",
     )
     description: str | None = Field(
         default=None,

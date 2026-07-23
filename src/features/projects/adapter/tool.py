@@ -76,7 +76,6 @@ async def _confirm_local(
     ctx: Context[AppContext],
     project: Project,
     root: Path,
-    subpath: str,
 ) -> Project | Skipped | Declined | Cancelled:
     """Interactive confirm for a local index.
 
@@ -92,7 +91,6 @@ async def _confirm_local(
             message=(
                 f"Index {project.name}?\n"
                 f"Path: {project.path}\n"
-                f"Sub:  {project.subpath or '(whole repo)'}\n"
                 f"Git:  {project.git_url or '(none)'}\n"
                 f"ID:   {project.id}"
             ),
@@ -108,7 +106,6 @@ async def _confirm_local(
             root,
             answer.data.name.strip() or project.name,
             answer.data.description.strip() or project.description,
-            subpath,
         )
     if isinstance(answer, DeclinedElicitation):
         return Declined()
@@ -127,11 +124,11 @@ async def index(
     the HEAD commit in the temporal log. Reports progress; in local mode it
     asks to confirm when the client supports it.
 
-    Project identity is hash(git remote + subpath), NOT the on-disk path: two
-    clones of the same repo+subpath are one project (re-running ``index``
-    refreshes it in place — there is no separate refresh tool), while different
-    subpaths of one repo are different projects. Requires a git remote. Does
-    NOT search the code; use the search tools for that.
+    Project identity is hash(git remote), NOT the on-disk path: two clones of
+    the same repo are one project (re-running ``index`` refreshes it in place —
+    there is no separate refresh tool). A project is always a whole repository;
+    subtrees are not indexed separately. Requires a git remote. Does NOT search
+    the code; use the search tools for that.
     """
     app = ctx.request_context.lifespan_context
     await asyncio.to_thread(sweep_stale_checkouts)
@@ -143,8 +140,7 @@ async def index(
 
     if params.repo_url is not None:
         current = await service.remote_head(
-            params.repo_url, params.ref, token, params.subpath,
-            app.graph_store,
+            params.repo_url, params.ref, token, app.graph_store,
         )
         if current is not None:
             project_id, ref, sha = current
@@ -155,16 +151,14 @@ async def index(
             if registered is not None:
                 return AlreadyCurrent(project=project_id, ref=ref, sha=sha)
         project, result = await service.index_remote(
-            params.repo_url, params.ref, token, params.subpath,
-            app, on_progress,
+            params.repo_url, params.ref, token, app, on_progress,
         )
     else:
         root = await asyncio.to_thread(_validated_root, params.directory or "")
         project = await asyncio.to_thread(
-            service.build_project,
-            root, params.name, params.description, params.subpath,
+            service.build_project, root, params.name, params.description,
         )
-        confirmed = await _confirm_local(ctx, project, root, params.subpath)
+        confirmed = await _confirm_local(ctx, project, root)
         if not isinstance(confirmed, Project):
             return confirmed
         project = confirmed

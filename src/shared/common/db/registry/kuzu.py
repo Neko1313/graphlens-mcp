@@ -6,7 +6,7 @@ from shared.common.db.graph.kuzu import KuzuGraphStore
 __all__ = ["KuzuProjectRegistry"]
 
 _FIELDS = "p.id AS id, p.name AS name, p.path AS path, " \
-    "p.subpath AS subpath, p.description AS description, p.git_url AS git_url"
+    "p.description AS description, p.git_url AS git_url"
 
 
 class KuzuProjectRegistry:
@@ -26,7 +26,7 @@ class KuzuProjectRegistry:
     async def ensure_schema(self) -> None:
         await self._store.execute(
             "CREATE NODE TABLE IF NOT EXISTS Project("
-            "id STRING, name STRING, path STRING, subpath STRING, "
+            "id STRING, name STRING, path STRING, "
             "description STRING, git_url STRING, "
             "PRIMARY KEY(id))",
         )
@@ -34,13 +34,12 @@ class KuzuProjectRegistry:
     async def add(self, project: Project) -> None:
         await self._store.execute(
             "MERGE (p:Project {id: $id}) "
-            "SET p.name = $name, p.path = $path, p.subpath = $subpath, "
+            "SET p.name = $name, p.path = $path, "
             "p.description = $description, p.git_url = $git_url",
             {
                 "id": project.id,
                 "name": project.name,
                 "path": str(project.path),
-                "subpath": project.subpath,
                 "description": project.description,
                 "git_url": project.git_url,
             },

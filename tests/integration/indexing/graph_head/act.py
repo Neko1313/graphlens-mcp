@@ -31,12 +31,12 @@ async def test_graph_head_tracks_the_last_indexed_commit(
 
     # Act — index ref main@A, then ref release@B into the SAME project.
     await index_project_graph(
-        root, PROJECT, graph_store, vector_store, None, "",
+        root, PROJECT, graph_store, vector_store, None,
         CommitInfo(ref="main", sha=sha_a, time_update=1),
     )
     head_after_a = await persist.graph_head(graph_store, PROJECT)
     await index_project_graph(
-        root, PROJECT, graph_store, vector_store, None, "",
+        root, PROJECT, graph_store, vector_store, None,
         CommitInfo(ref="release", sha=sha_b, time_update=2),
     )
     head_after_b = await persist.graph_head(graph_store, PROJECT)
