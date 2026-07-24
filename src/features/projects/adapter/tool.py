@@ -1,13 +1,15 @@
 import asyncio
 from pathlib import Path
+from typing import Annotated
 
 from mcp.server.mcpserver import (
     AcceptedElicitation,
     Context,
     DeclinedElicitation,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
+from entities import request
 from entities.project import Project
 from entities.request import IndexParams, RemoveProjectParams
 from entities.result import (
@@ -113,10 +115,31 @@ async def _confirm_local(
 
 
 async def index(
-    params: IndexParams,
     ctx: Context[AppContext],
+    directory: Annotated[
+        str | None,
+        Field(description=request.INDEX_DIRECTORY),
+    ] = None,
+    repo_url: Annotated[
+        str | None,
+        Field(description=request.INDEX_REPO_URL),
+    ] = None,
+    ref: Annotated[str | None, Field(description=request.INDEX_REF)] = None,
+    ci_token: Annotated[
+        SecretStr | None,
+        Field(description=request.INDEX_CREDENTIAL),
+    ] = None,
+    name: Annotated[str | None, Field(description=request.INDEX_NAME)] = None,
+    description: Annotated[
+        str | None,
+        Field(description=request.INDEX_DESCRIPTION),
+    ] = None,
 ) -> IndexProjectResult:
-    """Index a project into the code graph so it can be searched.
+    """Add a NEW project to the code graph. Setup, not navigation.
+
+    Do not call this to answer a question: an already-indexed project is ready
+    to query, and search / info / relations say so if it is not. Re-indexing
+    an unchanged checkout is wasted work.
 
     Give exactly one source: ``directory`` (a local checkout) or ``repo_url``
     (a remote cloned to a temp dir, for server/CI use). Parses with graphlens,
@@ -130,6 +153,17 @@ async def index(
     subtrees are not indexed separately. Requires a git remote. Does NOT search
     the code; use the search tools for that.
     """
+    # Built here rather than taken as a parameter: the model validator is the
+    # exactly-one-source rule, and its ValueError reaches the model as the
+    # tool's error message.
+    params = IndexParams(
+        directory=directory,
+        repo_url=repo_url,
+        ref=ref,
+        ci_token=ci_token,
+        name=name,
+        description=description,
+    )
     app = ctx.request_context.lifespan_context
     await asyncio.to_thread(sweep_stale_checkouts)
 
@@ -193,14 +227,19 @@ async def index(
 
 
 async def list_projects(ctx: Context[AppContext]) -> list[Project]:
-    """List every indexed project: id, name, path, git url, description."""
+    """List every indexed project: id, name, path, git url, description.
+
+    Housekeeping — "what do I have indexed", not a step before querying. The
+    navigation tools resolve the project on their own, so calling this first
+    just to learn an id is a wasted round trip.
+    """
     app = ctx.request_context.lifespan_context
     return await service.list_projects(app.registry)
 
 
 async def remove_project(
-    params: RemoveProjectParams,
     ctx: Context[AppContext],
+    project: Annotated[str, Field(description=request.REMOVE_PROJECT)],
 ) -> RemoveProjectResult:
     """Remove a project from the index — permanently.
 
@@ -208,6 +247,7 @@ async def remove_project(
     (so it stops appearing in the project list and search). Asks the user to
     confirm when the client supports it.
     """
+    params = RemoveProjectParams(project=project)
     app = ctx.request_context.lifespan_context
     existing = await service.get_project(app.registry, params.project)
     if existing is None:

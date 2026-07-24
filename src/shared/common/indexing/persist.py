@@ -8,6 +8,7 @@ from pathlib import Path
 from graphlens import Node, Relation
 
 from shared.common.db.graph import GraphExecutor, GraphStore
+from shared.common.db.graph.port import SupportsBulkCopy
 
 __all__ = [
     "clear_project",
@@ -283,8 +284,15 @@ async def persist_nodes(
     root: Path,
     project_id: str,
     nodes: Iterable[Node],
+    *,
+    fresh: bool = False,
 ) -> None:
-    """Batch-upsert nodes with one UNWIND per chunk (thousands/sec)."""
+    """Upsert nodes. ``fresh`` when the project has none yet — then a bulk
+    ``COPY`` replaces the per-node ``MERGE`` whose existence check full-scans
+    the table on Kuzu (same O(n²) as edges; see SupportsBulkCopy). ``COPY`` can
+    only insert, so it is used solely on that first-index path; an incremental
+    re-index touches a small delta where ``MERGE`` is cheap.
+    """
     rows = [
         {
             "id": gid(project_id, node.id),
@@ -300,6 +308,30 @@ async def persist_nodes(
         }
         for node in nodes
     ]
+
+    if fresh and isinstance(store, SupportsBulkCopy):
+        # Positional, in CodeNode's schema order: id, project_id, local_id,
+        # kind, qualified_name, name, file_path, span, metadata, content_hash.
+        await store.bulk_copy(
+            "CodeNode",
+            [
+                (
+                    r["id"],
+                    r["pid"],
+                    r["lid"],
+                    r["kind"],
+                    r["qn"],
+                    r["name"],
+                    r["fp"],
+                    r["span"],
+                    r["meta"],
+                    r["ch"],
+                )
+                for r in rows
+            ],
+        )
+        return
+
     for chunk in _chunks(rows, _BATCH):
         await store.execute(
             "UNWIND $rows AS r "
@@ -340,6 +372,18 @@ async def persist_relations(
                 "meta": _meta_json(relation.metadata),
             },
         )
+
+    # Fast path: clear_relations ran first, so this project's edges are gone
+    # and a bulk COPY appends them without the O(n²) per-edge endpoint lookup
+    # (see SupportsBulkCopy). Columns are positional, in Rel's schema order:
+    # FROM-key, TO-key, then kind, metadata.
+    if isinstance(store, SupportsBulkCopy):
+        await store.bulk_copy(
+            "Rel",
+            [(r["s"], r["t"], r["kind"], r["meta"]) for r in rows],
+        )
+        return len(rows)
+
     for chunk in _chunks(rows, _BATCH):
         await store.execute(
             "UNWIND $rows AS r "

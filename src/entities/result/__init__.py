@@ -138,6 +138,16 @@ class RelationsResult(BaseModel):
     implementors_total: int = 0
     references: list[NodeRef] = Field(default_factory=list)
     references_total: int = 0
+    not_indexed: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Groups this project has NO edges for at all, because its "
+            "language analyzer does not produce them (Rust emits no "
+            "inherits_from, Go no references). An empty group listed here "
+            "means 'unknown', not 'none' — do not read it as an answer, and "
+            "do not re-query hoping for a different one."
+        ),
+    )
     revision: Revision | None = None
 
 

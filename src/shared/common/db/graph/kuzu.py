@@ -1,5 +1,7 @@
 import asyncio
-from collections.abc import AsyncIterator
+import os
+import tempfile
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -9,6 +11,40 @@ import kuzu
 from shared.common.db.graph.port import GraphExecutor, GraphStoreError
 
 __all__ = ["KuzuGraphStore"]
+
+
+# Field/quote/escape chars for bulk_copy's staging file — control chars that
+# never appear in the data (hex ids, enum kinds, json.dumps'd JSON, source
+# snippets). Every non-null field is WRAPPED in the quote char, so a value may
+# freely contain commas, quotes, or raw newlines (the graphlens engine emits
+# multi-line names for grouped imports, e.g. `std::{\n  a,\n  b,\n}`): the
+# serial reader (PARALLEL=false) reads across the quoted newline exactly. Only
+# the three format chars themselves can never occur in a value.
+_COPY_DELIM = "\x01"
+_COPY_QUOTE = "\x02"
+_COPY_ESCAPE = "\x03"
+_COPY_RESERVED = (_COPY_DELIM, _COPY_QUOTE, _COPY_ESCAPE)
+
+
+def _encode_copy_row(row: "Sequence[Any]") -> str:
+    """One staging line.
+
+    ``None`` is written as an *unquoted* empty field, which Kuzu reads as NULL;
+    every other value is wrapped in the quote char so its contents (commas,
+    quotes, newlines) survive verbatim. A value containing one of the three
+    reserved format chars is a bug in the caller, so fail loudly.
+    """
+    cells = []
+    for value in row:
+        if value is None:
+            cells.append("")  # unquoted empty -> NULL
+            continue
+        cell = str(value)
+        if any(ch in cell for ch in _COPY_RESERVED):
+            msg = f"bulk_copy value holds a reserved char: {cell[:80]!r}"
+            raise GraphStoreError(msg)
+        cells.append(f"{_COPY_QUOTE}{cell}{_COPY_QUOTE}")
+    return _COPY_DELIM.join(cells) + "\n"
 
 
 def _rows(result: Any) -> list[dict[str, Any]]:
@@ -119,6 +155,68 @@ class KuzuGraphStore:
             except RuntimeError as exc:
                 raise GraphStoreError(str(exc)) from exc
             return _rows(result)
+
+    async def bulk_copy(
+        self,
+        table: str,
+        rows: Sequence[Sequence[Any]],
+    ) -> None:
+        """Load ``rows`` into ``table`` with one ``COPY``.
+
+        Implements SupportsBulkCopy — the O(n²)-avoiding write path.
+
+        Staged to a temp file that is always removed. The format is chosen to
+        need **no escaping at all**: fields are joined by a control-char
+        delimiter (``\\x01``) and the quote/escape chars are set to other
+        control chars (``\\x02``/``\\x03``). None of these — nor a raw
+        newline — can occur in the data (ids are hex, ``kind`` is an enum word,
+        and every JSON column comes from ``json.dumps``, which escapes control
+        chars and newlines). Kuzu's own CSV quoting was tried first and
+        desynchronised on doubled quotes across a large file; sidestepping
+        quoting entirely is what makes the round-trip exact. A value that does
+        contain a reserved char raises rather than silently corrupting.
+
+        Runs under the write gate like any other write; ``COPY`` appends, so
+        rows for other projects already in a shared table are untouched.
+        """
+        if not rows:
+            return
+
+        def _run() -> None:
+            # A dedicated *synchronous* connection: self._connection is a
+            # kuzu.AsyncConnection whose execute() is a coroutine, and calling
+            # it off the event loop (here, in a worker thread) would create a
+            # coroutine that never runs — the COPY would silently no-op. A
+            # plain Connection on the same Database commits normally and its
+            # writes are visible to every other connection.
+            connection = kuzu.Connection(self._database)
+            fd, path = tempfile.mkstemp(suffix=".csv")
+            try:
+                with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+                    for row in rows:
+                        fh.write(_encode_copy_row(row))
+                # Kuzu has no parameter binding for COPY paths; the path comes
+                # from mkstemp (no user input), and any embedded quote is
+                # doubled to stay inside the string literal.
+                safe = path.replace('"', '""')
+                # PARALLEL=false: the parallel reader splits the file into byte
+                # chunks blind to record boundaries; the serial reader is the
+                # one that reads our single-line, delimiter-clean rows exactly.
+                # COPY is already sub-second, so the lost parallelism is free.
+                connection.execute(
+                    f'COPY {table} FROM "{safe}" '
+                    f"(HEADER=false, PARALLEL=false, "
+                    f"DELIM='{_COPY_DELIM}', QUOTE='{_COPY_QUOTE}', "
+                    f"ESCAPE='{_COPY_ESCAPE}')",
+                )
+            finally:
+                os.unlink(path)
+
+        async with self._gate.shared():
+            try:
+                await asyncio.to_thread(_run)
+            except RuntimeError as exc:
+                raise GraphStoreError(str(exc)) from exc
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[GraphExecutor]:

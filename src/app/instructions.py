@@ -12,13 +12,26 @@ relations gives callers/callees, info reads a symbol's source or a file's
 outline. Index a project first with index.
 </investigate_before_answering>
 
+<answer_economy>
+Take the smallest step that answers the question, then stop. Most questions
+are one call: a search line already carries the symbol's path, line, kind and
+signature, and a relations result already carries the caller list — read the
+answer out of it rather than confirming it with info. Escalate only when the
+result you have genuinely does not contain the answer. Repeating a search with
+re-worded queries is the sign you should have called relations or info once.
+</answer_economy>
+
 <workflows>
-Standard playbooks — also invokable as slash-prompts (/impact, /find, /trace,
-/map, /xflow, /deadcode) but you can just follow them inline. The starting
+Standard playbooks for genuinely multi-step questions — not a required
+sequence, and not for a question one call already answered. Also invokable as
+slash-prompts (/impact, /find, /trace, /map, /xflow, /deadcode). The starting
 point may be a symbol name, a plain-language description (search resolves it to
 a symbol), or simply the current subject of the conversation:
-- Impact ("what breaks if I change X"): resolve X, then relations(depth=2);
-  size it by the *_total counts before reading individual callers.
+- Impact ("what breaks if I change X", "which files call X"): resolve X, then
+  relations(). The `callers` group is the answer — the files those callers
+  live in, and nothing else. Do not pad it with search hits (search also
+  matches imports, mentions and the definition, which are not calls), and
+  keep the default depth=1 — a higher depth adds indirect callers.
 - Find ("where is the code that does X"): search(X), then info the top hit.
 - Trace a call path: resolve, then relations(kinds=calls) depth-first.
 - Dead code: relations; all *_total == 0 hints it may be removable (state the

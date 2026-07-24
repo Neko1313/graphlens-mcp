@@ -9,7 +9,7 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "graphlens[go,python,rust,typescript,php]~=0.7.0",
+    "graphlens[go,python,rust,typescript,php]~=0.8.2",
     "kuzu~=0.11.3",
     "mcp[cli]==2.0.0b1",
     "model2vec~=0.8.2",
@@ -34,6 +34,13 @@ graphlens-mcp = "app.cli:main"
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.uv]
+# The MCP SDK is pinned to a beta — `mcp[cli]==2.0.0b1` — whose transitive
+# `mcp-types==2.0.0b1` is also a pre-release. A fresh resolution (e.g.
+# `uv tool install ./`) rejects pre-releases by default, so allow them here.
+# Remove this once `mcp` 2.x ships a stable release and the pin is bumped.
+prerelease = "allow"
 
 # The refactor moved off a single src/graphlens_mcp/ package onto a feature-sliced
 # layout with multiple top-level packages (app/entities/features/shared) directly

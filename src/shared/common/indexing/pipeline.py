@@ -142,12 +142,20 @@ async def _persist_touched(
     nodes: list[Node],
     total: int,
     on_progress: ProgressCallback | None,
+    *,
+    fresh: bool = False,
 ) -> None:
     """Upsert the added/changed nodes, reporting progress per file."""
     by_file = _group_by_file(root, nodes)
     n_files = max(len(by_file), 1)
     for index, (file_path, file_nodes) in enumerate(by_file.items(), start=1):
-        await persist.persist_nodes(graph_store, root, project_id, file_nodes)
+        await persist.persist_nodes(
+            graph_store,
+            root,
+            project_id,
+            file_nodes,
+            fresh=fresh,
+        )
         await _report(
             on_progress,
             round(index / n_files * total),
@@ -287,6 +295,8 @@ async def index_project_graph(
         on_progress,
     )
 
+    # A first index of this project (nothing stored) inserts every node once,
+    # so it can take the bulk-COPY path; a re-index MERGEs only the delta.
     await _persist_touched(
         root,
         graph_store,
@@ -294,6 +304,7 @@ async def index_project_graph(
         touched,
         total,
         on_progress,
+        fresh=not stored,
     )
     if removed:
         await persist.delete_nodes(graph_store, project_id, removed)

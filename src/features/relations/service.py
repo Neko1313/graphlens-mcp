@@ -140,20 +140,55 @@ async def _assemble(
     return result
 
 
+# Which navigation group each edge kind feeds, for the coverage report below.
+_GROUP_OF_KIND = {
+    "calls": "callers/callees",
+    "inherits_from": "implementors",
+    "references": "references",
+}
+
+
+async def _not_indexed(
+    graph_store: GraphExecutor,
+    project_id: str,
+) -> list[str]:
+    """Groups this project has no edges for anywhere — "unknown", not "none".
+
+    Language coverage is uneven: the Rust analyzer emits no ``inherits_from``
+    at all and the Go one no ``references``. An empty ``implementors`` then
+    looks like a confident "nothing implements this trait", and an agent that
+    believes it either answers wrongly or (measured on ripgrep) spends two
+    dozen calls re-deriving by hand what the graph will never hold. Saying so
+    costs one aggregate query and ends the search.
+    """
+    rows = await graph_store.execute(
+        "MATCH (a:CodeNode {project_id: $p})-[e:Rel]->() "
+        "RETURN DISTINCT e.kind AS kind",
+        {"p": project_id},
+    )
+    present = {row["kind"] for row in rows}
+    return [
+        group
+        for kind, group in _GROUP_OF_KIND.items()
+        if kind not in present
+    ]
+
+
 async def get_relations(
     graph_store: GraphExecutor,
     project_id: str,
     node_id: str,
-    depth: int = 2,
+    depth: int = 1,
     limit: int = 25,
     kinds: str = "",
 ) -> RelationsResult | None:
     """The four navigation groups for a node. None if the node is unknown.
 
-    callers/callees follow ``calls`` to ``depth`` hops; implementors follow
-    ``inherits_from`` and references follow ``references`` (direct). ``kinds``
-    narrows which groups are computed; ``*_total`` is the true count before
-    ``limit``, ``callees_unresolved`` counts calls graphlens couldn't bind.
+    callers/callees follow ``calls`` to ``depth`` hops (default 1 = direct);
+    implementors follow ``inherits_from`` and references follow ``references``
+    (direct). ``kinds`` narrows which groups are computed; ``*_total`` is the
+    true count before ``limit``, ``callees_unresolved`` counts calls graphlens
+    couldn't bind.
     """
     node = await _node_ref(graph_store, project_id, node_id)
     if node is None:
@@ -172,7 +207,9 @@ async def get_relations(
             limit,
         )
 
-    return await _assemble(node, depth, kinds, fetch)
+    result = await _assemble(node, depth, kinds, fetch)
+    result.not_indexed = await _not_indexed(graph_store, project_id)
+    return result
 
 
 def _ref_from_row(row: dict[str, Any]) -> NodeRef:
@@ -265,7 +302,7 @@ async def get_relations_at(
     project_id: str,
     point: temporal.Point,
     node_id: str,
-    depth: int = 2,
+    depth: int = 1,
     limit: int = 25,
     kinds: str = "",
 ) -> RelationsResult | None:

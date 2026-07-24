@@ -27,20 +27,49 @@ async def resolve_project(
 ) -> str:
     """Pick which project a query targets: the given id, or the sole one.
 
-    Raises ValueError when the id is unknown, none are indexed, or the choice
-    is ambiguous — surfacing an actionable message to the caller.
+    An id like ``hono_fe98d8970535`` is not something a caller can know, so a
+    project's **name** resolves too, as does an unambiguous prefix of its id.
+    Insisting on the exact id turned every guess into a rejected call followed
+    by list_projects and a retry — three round trips to say "hono".
+
+    Raises ValueError when nothing matches, none are indexed, or the choice is
+    ambiguous — surfacing an actionable message to the caller.
     """
+    projects = await registry.list_all()
     if project_id:
         if await registry.get(project_id) is None:
-            msg = f"unknown project: {project_id}"
-            raise ValueError(msg)
+            # With one project indexed there is nothing else the caller could
+            # have meant, so a wrong value is answered rather than rejected —
+            # models fill this argument from whatever name is in front of them
+            # (a crate, a package, a directory) and a rejection buys three
+            # round trips to arrive back at the only possible answer.
+            if len(projects) == 1:
+                return projects[0].id
+            return _match(project_id, projects)
         return project_id
-    projects = await registry.list_all()
     if len(projects) == 1:
         return projects[0].id
     if not projects:
         msg = "no projects indexed yet; run index first"
         raise ValueError(msg)
-    ids = ", ".join(p.id for p in projects)
-    msg = f"multiple projects indexed; pass project= one of: {ids}"
+    listing = ", ".join(f"{p.name} ({p.id})" for p in projects)
+    msg = f"multiple projects indexed; pass project= one of: {listing}"
+    raise ValueError(msg)
+
+
+def _match(given: str, projects: list) -> str:
+    """Resolve a name or id-prefix to exactly one project id."""
+    needle = given.strip().lower()
+    hits = [
+        p
+        for p in projects
+        if p.name.lower() == needle or p.id.lower().startswith(needle)
+    ]
+    if len(hits) == 1:
+        return hits[0].id
+    known = ", ".join(f"{p.name} ({p.id})" for p in projects) or "none"
+    if not hits:
+        msg = f"unknown project: {given}. Indexed: {known}"
+        raise ValueError(msg)
+    msg = f"ambiguous project: {given}. Matches: {known}"
     raise ValueError(msg)

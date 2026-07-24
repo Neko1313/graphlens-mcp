@@ -1,3 +1,8 @@
+from typing import Annotated
+
+from pydantic import Field
+
+from entities import request
 from entities.request import RelationsParams
 from entities.result import Candidates, NodeRef, NotFound, RelationsLookup
 from features.relations import service
@@ -12,17 +17,44 @@ from shared.common.indexing import (
 __all__ = ["relations"]
 
 
-async def relations(params: RelationsParams) -> RelationsLookup:
+async def relations(  # noqa: PLR0913 — one flat parameter per tool argument
+    symbol: Annotated[str, Field(description=request.RELATIONS_SYMBOL)],
+    project: Annotated[str | None, Field(description=request.PROJECT)] = None,
+    depth: Annotated[int, Field(description=request.RELATIONS_DEPTH)] = 1,
+    limit: Annotated[int, Field(description=request.RELATIONS_LIMIT)] = 25,
+    kinds: Annotated[str, Field(description=request.RELATIONS_KINDS)] = "",
+    file: Annotated[
+        str,
+        Field(description=request.FILE_DISAMBIGUATOR),
+    ] = "",
+    ref: Annotated[str, Field(description=request.HISTORY_REF)] = "",
+    at: Annotated[str, Field(description=request.RELATIONS_AT)] = "",
+) -> RelationsLookup:
     """Find a symbol's callers, callees, implementors, and references.
 
     Returns the four navigation groups to ``depth`` hops with ``*_total``
     counts (and ``callees_unresolved`` for calls graphlens couldn't bind). An
     ambiguous name returns candidates — narrow with ``file``.
 
+    ``not_indexed`` names the groups this project's language analyzer never
+    produces (Rust: implementors; Go: references). A group listed there is
+    unknown, not empty — say so rather than re-deriving it by hand, and never
+    read its emptiness as an answer.
+
     Pass ``ref``/``at`` to read the graph as it was at an indexed commit
     instead of now: neighbours then come from the version log, so an edge that
     has since been removed is still there and one added later is not.
     """
+    params = RelationsParams(
+        symbol=symbol,
+        project=project,
+        depth=depth,
+        limit=limit,
+        kinds=kinds,
+        file=file,
+        ref=ref,
+        at=at,
+    )
     graph_store = get_graph_store()
     project_id = await resolve_project(get_registry_store(), params.project)
     point = None
