@@ -8,6 +8,9 @@ resolution-markers = [
     "python_full_version < '3.14' and sys_platform != 'win32'",
 ]
 
+[options]
+prerelease-mode = "allow"
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -353,11 +356,11 @@ wheels = [
 
 [[package]]
 name = "graphlens"
-version = "0.7.0"
+version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/db/f6/21af5081826ecb7d5fb4c06d702ccd26010c63b95a08760311034db00094/graphlens-0.7.0.tar.gz", hash = "sha256:211d2a00bec5f88cba9e6ce38b6636694883578a4aee85563f7859ced687961f", size = 25050, upload-time = "2026-06-23T20:24:33.924Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/ca/944cc39c5d95ca52b2143faeceec63892f706a1021acfde1577647617f0b/graphlens-0.8.2.tar.gz", hash = "sha256:ac96b1dbc774f302955c9c9ffa12a922de46eedf1f2301b405efb1eb00321791", size = 25503, upload-time = "2026-07-24T12:46:43.741Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/07/b7fb0e43d3b15912a293df5dae70af05cb764044d3bdd9b18c5a93aa6f9a/graphlens-0.7.0-py3-none-any.whl", hash = "sha256:9e5d955551978caf5dbf49a0d8dfc9f7c9683830f3e829f84ccce9ebc04f56e4", size = 33245, upload-time = "2026-06-23T20:24:26.592Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/bc/1b8592423e3a33448390cdf4e9f43e00b7aa862a774e5572fd7012ce2196/graphlens-0.8.2-py3-none-any.whl", hash = "sha256:d866c54d5763c55ddf2d71b15ca9a35d25e542b5e35736456c90213470ba14ee", size = 33564, upload-time = "2026-07-24T12:46:35.702Z" },
 ]
 
 [package.optional-dependencies]
@@ -379,16 +382,16 @@ typescript = [
 
 [[package]]
 name = "graphlens-go"
-version = "0.7.0"
+version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphlens" },
     { name = "tree-sitter" },
     { name = "tree-sitter-go" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/f0/55a0b53510ff6adfb207fda09cf92ebc49f98c412b5e4268d30d3e73cf5a/graphlens_go-0.7.0.tar.gz", hash = "sha256:9d9be85493553af6aa05b08004a85c67b44c2c344f739c2bc70d3580374e814c", size = 16835, upload-time = "2026-06-23T20:24:35.35Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/53/bda80fafd3219a54c7288b5f67efdcc2042b2e909619d09e228bd8e5851f/graphlens_go-0.8.2.tar.gz", hash = "sha256:881c3a061ffd2c6bba52799d9875ef9b515fb08bb737d1515a23712c7ac6cfb6", size = 17617, upload-time = "2026-07-24T12:46:45.569Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/eb/4b/8d514348e8fd101ab0e0b1d792004f0486d018eb093d1fa756062a9ea5c9/graphlens_go-0.7.0-py3-none-any.whl", hash = "sha256:8d066e438f2eb37680dc762b97839893d2c4c30c99841831a3d631439eb52946", size = 20542, upload-time = "2026-06-23T20:24:28.594Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/ef/f16ba1c9e14f1aa8644ee17173248e06f40188ee57ae2e44696647b9ab96/graphlens_go-0.8.2-py3-none-any.whl", hash = "sha256:28882b4ce15683b06b5990ec461d99813ef5b8fe77a0ed9e83ada210f74d1f65", size = 21378, upload-time = "2026-07-24T12:46:38.854Z" },
 ]
 
 [[package]]
@@ -432,7 +435,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
-    { name = "graphlens", extras = ["go", "python", "rust", "typescript", "php"], specifier = "~=0.7.0" },
+    { name = "graphlens", extras = ["go", "python", "rust", "typescript", "php"], specifier = "~=0.8.2" },
     { name = "kuzu", specifier = "~=0.11.3" },
     { name = "mcp", extras = ["cli"], specifier = "==2.0.0b1" },
     { name = "milvus-lite", specifier = "~=2.4.12" },
@@ -465,21 +468,21 @@ test = [
 
 [[package]]
 name = "graphlens-php"
-version = "0.7.0"
+version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphlens" },
     { name = "tree-sitter" },
     { name = "tree-sitter-php" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/33/5d/7b8915397f49b8ed3403e9b51e7dea4e579d62efbb05e64d2a70052dc08a/graphlens_php-0.7.0.tar.gz", hash = "sha256:fe696e6b6dcfcc29a3732dda29a020c8f95140c80a9d991d28eaf7cc3737b3be", size = 19673, upload-time = "2026-06-23T20:24:37.005Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/5e/e9cf2eb2ecd0b34cdff45abec8dbc907469bd5b7c90cf33ad35d6ea94cda/graphlens_php-0.8.2.tar.gz", hash = "sha256:a7d931298f1282f4cd9e039408839e783f2333db39357a2df3b29336c464df46", size = 20531, upload-time = "2026-07-24T12:46:46.888Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/90/95/693b12fe72d669de1d1ee4d623159e760b22df4a24edfd1ac6c46d338c04/graphlens_php-0.7.0-py3-none-any.whl", hash = "sha256:0e97658f8b65eb2a5fbe131f15e18498adbed84f0a6a424b537359f09b5a998b", size = 23714, upload-time = "2026-06-23T20:24:30.118Z" },
+    { url = "https://files.pythonhosted.org/packages/07/e4/4be3fd182f6d264f1e7db940bf26e0e4b0cb4dfff0a5f119af7264994157/graphlens_php-0.8.2-py3-none-any.whl", hash = "sha256:cd85faa599c0184143535507de84f7ff9ad65f44e71c285333a67aec8e79f3e0", size = 24634, upload-time = "2026-07-24T12:46:40.325Z" },
 ]
 
 [[package]]
 name = "graphlens-python"
-version = "0.7.0"
+version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphlens" },
@@ -487,37 +490,37 @@ dependencies = [
     { name = "tree-sitter-python" },
     { name = "ty" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/15/442bfc251113a98c620b55c72e962d0cc7b4f596bdfa849f11a4eb7f9c58/graphlens_python-0.7.0.tar.gz", hash = "sha256:6474bad39bad74299d39f9199c7156546561b5ee6df9c1db9651aac5b429c3ca", size = 25289, upload-time = "2026-06-23T20:24:37.691Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/60/b3f0ad8f676d7f73109af0c96f1f9a739d3af4a4a10ef5058f762322138a/graphlens_python-0.8.0.tar.gz", hash = "sha256:5919267edc2c81a45e60aba8d6a59097a655477d4795ae20e760b5f41a8ead41", size = 25613, upload-time = "2026-07-22T22:30:00.322Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/a5/e1d98a589ed7391464d11691b1cd0b31fd0e01330d56f549126a45f128cf/graphlens_python-0.7.0-py3-none-any.whl", hash = "sha256:49cbbf388425b384e85f6c7e69c58dc624d738d360aa760525fe61f193c7b2f6", size = 29736, upload-time = "2026-06-23T20:24:31.243Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/88/5fec2374bf72a7750076a6a655a3eaca504ccbb1ad14575158ab19796d6c/graphlens_python-0.8.0-py3-none-any.whl", hash = "sha256:8faf40edbc3e06969c6d7db6bfefc8a45a6a49212261e9a9a773318cd09f1055", size = 30063, upload-time = "2026-07-22T22:29:53.938Z" },
 ]
 
 [[package]]
 name = "graphlens-rust"
-version = "0.7.0"
+version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphlens" },
     { name = "tree-sitter" },
     { name = "tree-sitter-rust" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/34/06/3f8d80b922c4685e16ca722b7e3013e274dd4274f0d915619ffc3392c252/graphlens_rust-0.7.0.tar.gz", hash = "sha256:7c8abb1e053399c4fe7db645ac1cbb4b6fa18cde46e290a260c53567cce78974", size = 23608, upload-time = "2026-06-23T20:24:38.241Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4f/39/6ae40d84834cda06bc51fa1344f6f7ea10db34bf89f4f8a8775332fd5a42/graphlens_rust-0.8.2.tar.gz", hash = "sha256:b4a60eeadb438291299f054c39a68eaed95b64491f178992f1b4d298925eb6e5", size = 24138, upload-time = "2026-07-24T12:46:48.135Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/17/d9/e513cbfef47c8804065651234d963b68fa239dc997e2fcbf7bbd2067d6ff/graphlens_rust-0.7.0-py3-none-any.whl", hash = "sha256:f15f068305e0e4b32a4d15cbd61086db134df4589bf4745b31a314363bb2eb9f", size = 28034, upload-time = "2026-06-23T20:24:32.149Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/76/01b9385c59d854b09f8e831f8fd901e59c812872c7d93a5b58c5357deeed/graphlens_rust-0.8.2-py3-none-any.whl", hash = "sha256:6b40bb6fdc8eba94554bdb9a4e3927d5ca52a1e658f793486f8bc47670adf9fb", size = 28587, upload-time = "2026-07-24T12:46:42.079Z" },
 ]
 
 [[package]]
 name = "graphlens-typescript"
-version = "0.7.0"
+version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "graphlens" },
     { name = "tree-sitter" },
     { name = "tree-sitter-typescript" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/70/c7/6e6c1e6cd4123b2c82ea240c4980e7bee38f82f5b3c29e2ec7d7ea4dee94/graphlens_typescript-0.7.0.tar.gz", hash = "sha256:bdf37517c9c050834726832017ae4fe01de37e7454b273ebc65ea8ee166e586f", size = 27204, upload-time = "2026-06-23T20:24:38.78Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/1c/dcf2fd49ab7ffa187d74e0abbdd3d163170317834f8c3b235a1ec4589e67/graphlens_typescript-0.8.2.tar.gz", hash = "sha256:d54a40b235aefd03ae3ae0971f27c54ce06918a0f77daf4b24f95ba4e27586cc", size = 27817, upload-time = "2026-07-24T12:46:48.76Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/06/17f0e84707cba8e345f4fbdb1d86ef7bb979b2f13931a592544b895b1d03/graphlens_typescript-0.7.0-py3-none-any.whl", hash = "sha256:442031e46109c7a8a6490c64517559d4cce48bd790ed3958757d93f3fe3910ea", size = 32040, upload-time = "2026-06-23T20:24:32.955Z" },
+    { url = "https://files.pythonhosted.org/packages/23/69/0486fcabd45fafe279033816f452e4c0026c55fb169f89f338d2905357cd/graphlens_typescript-0.8.2-py3-none-any.whl", hash = "sha256:b644a5bf41df8fcc1a32af5acb772d7564086f050905319acbe0738c92c4af52", size = 32654, upload-time = "2026-07-24T12:46:42.953Z" },
 ]
 
 [[package]]
