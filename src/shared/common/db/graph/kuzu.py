@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import kuzu
 
-from shared.common.db.graph.port import GraphExecutor
+from shared.common.db.graph.port import GraphExecutor, GraphStoreError
 
 __all__ = ["KuzuGraphStore"]
 
@@ -89,7 +89,11 @@ class _KuzuTransaction:
         query: str,
         parameters: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
-        return _rows(self._connection.execute(query, parameters))
+        try:
+            result = self._connection.execute(query, parameters)
+        except RuntimeError as exc:
+            raise GraphStoreError(str(exc)) from exc
+        return _rows(result)
 
 
 class KuzuGraphStore:
@@ -110,7 +114,11 @@ class KuzuGraphStore:
         parameters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         async with self._gate.shared():
-            return _rows(await self._connection.execute(query, parameters))
+            try:
+                result = await self._connection.execute(query, parameters)
+            except RuntimeError as exc:
+                raise GraphStoreError(str(exc)) from exc
+            return _rows(result)
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[GraphExecutor]:

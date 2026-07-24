@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -34,6 +35,17 @@ _CHECKOUT_PREFIX = "clone-"
 # Retained per-project working trees: named (not pid-keyed) so the liveness
 # sweep never reaps them — server-mode reads need the tree after indexing.
 _RETAINED_PREFIX = "project-"
+# compute_project_id() only ever emits this charset; enforced here too so a
+# path built from it can never escape _CHECKOUT_ROOT via "../" or an absolute
+# override, regardless of what a future caller passes in.
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _require_safe_project_id(project_id: str) -> str:
+    if not _PROJECT_ID_RE.fullmatch(project_id):
+        msg = f"unsafe project_id: {project_id!r}"
+        raise ValueError(msg)
+    return project_id
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
@@ -315,7 +327,7 @@ def retain_checkout(dest: Path, project_id: str) -> Path:
     project is replaced. ``project_id`` is ``[A-Za-z0-9_]`` — a safe dir name.
     """
     root = _ensure_secure_root()
-    stable = root / f"{_RETAINED_PREFIX}{project_id}"
+    stable = root / f"{_RETAINED_PREFIX}{_require_safe_project_id(project_id)}"
     shutil.rmtree(stable, ignore_errors=True)
     dest.rename(stable)
     return stable
@@ -323,8 +335,9 @@ def retain_checkout(dest: Path, project_id: str) -> Path:
 
 def remove_retained(project_id: str) -> None:
     """Delete a project's retained working tree (on project removal)."""
+    safe_id = _require_safe_project_id(project_id)
     shutil.rmtree(
-        _CHECKOUT_ROOT / f"{_RETAINED_PREFIX}{project_id}",
+        _CHECKOUT_ROOT / f"{_RETAINED_PREFIX}{safe_id}",
         ignore_errors=True,
     )
 

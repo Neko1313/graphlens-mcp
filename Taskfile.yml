@@ -15,9 +15,12 @@ tasks:
     silent: true
 
   install:
-    desc: Sync the virtualenv with all dependency groups
+    desc: Sync the virtualenv with all dependency groups and extras
     cmds:
-      - uv sync --all-groups
+      # --all-extras: the neo4j backend module imports the `neo4j` package
+      # unconditionally at module level, so lint/typecheck/tests need it
+      # installed even when nobody's exercising the Neo4j backend itself.
+      - uv sync --all-groups --all-extras
 
   lint:
     desc: Lint with ruff (curated ruleset in ruff.toml)
@@ -52,10 +55,11 @@ tasks:
 
   test:
     desc: Run the test suite in parallel with coverage
-    # Keep the embedding model off the network: the semantic tests drive the
-    # real code paths with a monkeypatched model and assert the offline-degrade
-    # behavior, so a CI run must never try to download potion-code-16M (which
-    # would be slow and flaky). Tests that need a live model are skipped.
+    # Keep the embedding model off the network: an autouse fixture
+    # (tests/fixtures/embedding.py) replaces the real model2vec model with a
+    # deterministic, hash-seeded fake for every test, so encode() never tries
+    # to download potion-code-16M (which would be slow, flaky, and — on a
+    # network-isolated CI runner — a hard failure).
     env:
       HF_HUB_OFFLINE: "1"
     # loadgroup, not the default load: the Milvus-backed tests are pinned to one

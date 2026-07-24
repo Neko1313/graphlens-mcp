@@ -1,16 +1,25 @@
+import asyncio
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, LiteralString, cast
 
+import neo4j.exceptions
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncTransaction, Query
 
-from shared.common.db.graph.port import GraphExecutor
+from shared.common.db.graph.port import GraphExecutor, GraphStoreError
 
 __all__ = ["Neo4jGraphStore"]
 
-# Kuzu-only DDL: Neo4j is schemaless, so these statements are no-ops.
-_DDL_PREFIXES = ("CREATE NODE TABLE", "CREATE REL TABLE")
+# Kuzu's ``CREATE NODE TABLE foo(id STRING, PRIMARY KEY(id))`` declares the
+# uniqueness Neo4j needs a constraint for; Kuzu's ``CREATE REL TABLE`` has no
+# Neo4j equivalent (relationships aren't uniquely keyed) and is dropped.
+_NODE_TABLE_RE = re.compile(
+    r"CREATE\s+NODE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*"
+    r"\([^)]*PRIMARY\s+KEY\s*\(\s*(\w+)\s*\)",
+    re.IGNORECASE,
+)
+_REL_TABLE_PREFIX = "CREATE REL TABLE"
 # rels(<var>) is Kuzu's extractor for a variable-length relationship; in Neo4j
 # that variable is already the relationship list, so the wrapper is dropped.
 _RELS_RE = re.compile(r"\brels\(\s*(\w+)\s*\)")
@@ -18,7 +27,15 @@ _RELS_RE = re.compile(r"\brels\(\s*(\w+)\s*\)")
 
 def _translate(query: str) -> str | None:
     """Rewrite Kuzu-isms; ``None`` for a statement Neo4j should skip."""
-    if query.lstrip().upper().startswith(_DDL_PREFIXES):
+    stripped = query.lstrip()
+    node_table = _NODE_TABLE_RE.match(stripped)
+    if node_table is not None:
+        label, key = node_table.group(1), node_table.group(2)
+        return (
+            f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:{label}) "
+            f"REQUIRE n.{key} IS UNIQUE"
+        )
+    if stripped.upper().startswith(_REL_TABLE_PREFIX):
         return None
     return _RELS_RE.sub(r"\1", query)
 
@@ -44,21 +61,26 @@ class _Neo4jTransaction:
         translated = _translate(query)
         if translated is None:
             return []
-        result = await self._transaction.run(
-            _text(translated),
-            parameters or {},
-        )
-        return [dict(record) async for record in result]
+        try:
+            result = await self._transaction.run(
+                _text(translated),
+                parameters or {},
+            )
+            return [dict(record) async for record in result]
+        except neo4j.exceptions.GqlError as exc:
+            raise GraphStoreError(str(exc)) from exc
 
 
 class Neo4jGraphStore:
     """GraphStore backed by a Neo4j server — the server-tier graph backend.
 
     Speaks the same Cypher as the embedded Kuzu backend after a thin dialect
-    shim: Kuzu's ``CREATE NODE/REL TABLE`` declarations are skipped (Neo4j is
-    schemaless), and its ``rels(...)`` extractor is unwrapped to the bare
-    variable Neo4j expects on a variable-length path. Every non-trivial query
-    is verified against a real Neo4j in the tests. Both engines accept the rest
+    shim: Kuzu's ``CREATE NODE TABLE ... PRIMARY KEY(...)`` becomes a Neo4j
+    uniqueness constraint (which also backs the lookup with an index), its
+    ``CREATE REL TABLE`` is dropped (relationships aren't uniquely keyed in
+    Neo4j), and its ``rels(...)`` extractor is unwrapped to the bare variable
+    Neo4j expects on a variable-length path. Every non-trivial query is
+    verified against a real Neo4j in the tests. Both engines accept the rest
     of the query surface as written (``MERGE``/``UNWIND``/``DETACH DELETE``,
     ``toLower`` + ``CONTAINS``, and the ``max``-then-rematch ``state_at``
     aggregation).
@@ -66,6 +88,14 @@ class Neo4jGraphStore:
 
     def __init__(self, driver: AsyncDriver) -> None:
         self._driver = driver
+        # Neo4j's default isolation takes write locks at write time, not at
+        # read time: a transaction that reads a value (e.g. the temporal
+        # log's head seq) and later writes the value it computed from that
+        # read can still race another transaction doing the same read before
+        # either has written. Kuzu is exempt from this because it allows
+        # only one write transaction system-wide; this lock gives our own
+        # transactions the same one-at-a-time guarantee here.
+        self._write_lock = asyncio.Lock()
 
     @classmethod
     def connect(
@@ -84,21 +114,28 @@ class Neo4jGraphStore:
         translated = _translate(query)
         if translated is None:
             return []
-        async with self._driver.session() as session:
-            result = await session.run(
-                Query(_text(translated)),
-                parameters or {},
-            )
-            return [dict(record) async for record in result]
+        try:
+            async with self._driver.session() as session:
+                result = await session.run(
+                    Query(_text(translated)),
+                    parameters or {},
+                )
+                return [dict(record) async for record in result]
+        except neo4j.exceptions.GqlError as exc:
+            raise GraphStoreError(str(exc)) from exc
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[GraphExecutor]:
         """Run statements atomically in one explicit Neo4j transaction.
 
-        Unlike the embedded backend this needs no process-wide gate: Neo4j
-        isolates concurrent transactions itself.
+        Serialized process-wide by ``_write_lock``: read-then-write
+        sequences inside a transaction (the temporal log's seq allocation)
+        are only safe from lost updates if no other transaction from this
+        store can be in flight at the same time. This does not protect
+        against a second process writing the same project concurrently —
+        same limitation the embedded Kuzu backend has.
         """
-        async with self._driver.session() as session:
+        async with self._write_lock, self._driver.session() as session:
             transaction = await session.begin_transaction()
             try:
                 yield _Neo4jTransaction(transaction)
