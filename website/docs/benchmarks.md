@@ -17,35 +17,45 @@ adds over the model's own memory — across ten real open-source repositories
 ## Scope
 
 - **10 projects**: gin, echo, ripgrep, clap, fastapi, click, httpx, hono, zod, superset.
-- **3 models**, spanning strong to genuinely weak: `deepseek-v4-flash`, `gemma-4-26b`,
-  `gpt-oss-20b`.
+- **2 models**, a strong one and a weaker one: `deepseek-v4-flash` and `glm-4.7-flash`. The
+  model is held constant across arms, so within a model the only variable is the tool surface.
+  (A third weak model, `gpt-oss-20b`, was dropped after it was verified to fail at *synthesising*
+  answers from tool results — a model limitation, not a tool-surface one — which added noise.)
 - **2 difficulty tiers**: `SIMPLE` (symbol/definition lookups, single-hop) and `HARD`
   (impact analysis, disambiguation, multi-hop cross-file questions).
-- **~2,400 graded runs**, each with token/tool-call/dollar cost recorded alongside accuracy.
+- **~1,600 graded runs** (4 arms × 2 models × 10 projects × 10 tasks × 2 seeds), each with
+  token/tool-call/dollar cost recorded alongside accuracy.
 
 ## Headline result
 
+Ranges span the strong model ↔ the weaker model (`deepseek-v4-flash` ↔ `glm-4.7-flash`):
+
 | | SIMPLE accuracy | HARD accuracy | HARD tokens (median) | HARD completion |
 |---|---|---|---|---|
-| **graphlens** | 0.980 – 1.000 | 0.899 – 0.921 | **22.4k – 34.1k** | **≥ 0.959 on every model** |
-| codegraph | 0.912 – 0.990 | 0.655 – 0.939 | 23.2k – 70.0k | drops to 0.765 on the weakest model |
-| semble | 0.647 – 0.961 | 0.555 – 0.850 | 21.6k – 74.9k | drops to 0.688 on the weakest model |
-| none (control) | 0.366 – 0.681 | 0.453 – 0.685 | 0.1k – 0.9k | — |
+| **graphlens** | 0.990 – 1.000 | 0.937 – 0.971 | 21.9k – 34.0k | 0.827 – 0.990 |
+| codegraph | 0.990 – 1.000 | 0.963 – 0.968 | 23.2k – 29.7k | 0.816 – 1.000 |
+| semble | 0.984 – 1.000 | 0.952 – 0.960 | 17.9k – 60.8k | **0.306** – 0.908 |
+| none (control) | 0.600 – 0.639 | 0.665 – 0.702 | 0.3k – 0.8k | — |
 
-Accuracy alone hides the number that maps directly to a bill: **tokens paid per task**.
-graphlens's HARD-tier token spend stays flat (22k–34k) across the whole model range; codegraph's
-and semble's balloon past 70k on the weakest model — more than double graphlens's ceiling — for
-a *worse* answer, not a better one. Accuracy and token cost are both worth reading, and reading
-together: a tool that's marginally more accurate but burns 2× the tokens per task isn't
-obviously the better deal once that scales to a real workload.
+On the **strong** model, graphlens leads: SIMPLE 1.000, HARD 0.971 at the lowest median token
+cost of the real arms (21.9k HARD, vs codegraph 23.2k and semble 60.8k). On the **weaker**
+model the picture is a close race between the two graph-based arms — codegraph nudges ahead on
+HARD accuracy (0.968 vs 0.937), graphlens on completion (0.827 vs 0.816) — so the old claim
+that graphlens's lead *widens* on weaker models does not hold here; it's a genuine tie.
 
-graphlens is the only arm that stays clearly ahead of the no-tools control **and** keeps
-completion above 0.95 at every model tier. The gap over codegraph widens, not narrows, as the
-driving model gets weaker: on the weakest model tested (`gpt-oss-20b`), graphlens holds
-**0.900** HARD accuracy at **0.959** completion, while codegraph drops to **0.655** accuracy
-with completion falling to **0.765** — roughly 1 in 4 of its runs never produce an answer at
-all, most often by exhausting its own output-token budget mid-answer. graphlens gets there at
-**roughly half the token cost** (34k vs 70k median tokens per HARD task).
+What does separate the arms on the weaker model is **completion**: `semble`'s HARD completion
+collapses to **0.306** — two runs in three never finish, looping on semantic hits the weak
+model can't synthesise into an answer — while both graph-based arms hold near 0.82. The robust,
+model-independent finding is that *graph-structured context degrades gracefully as the driving
+model weakens; semantic-only search does not*.
+
+Every real arm clears the no-tools control by a wide margin — graphlens's lift is **+0.31–0.40
+HARD**. graphlens's own cost tail is a few *impact/enumeration* tasks (e.g. "which files
+construct `Request(...)`") where the model spirals in `search`; these inflate its *mean* token
+spend but not its median. Upgrading the engine to `graphlens 0.8.2` (which added Rust
+`implementors`, Go `references`, and TypeScript barrel/type-annotation edges the previous
+version missed) cut those tails sharply — e.g. `hono_impact_getpath` fell from 486k to 111k
+tokens once `getPath`'s callers resolved through the barrel re-export.
 
 ### Full breakdown
 
@@ -54,18 +64,14 @@ all, most often by exhausting its own output-token budget mid-answer. graphlens 
 
 | arm | model | accuracy | completion | tokens | cost |
 |---|---|---|---|---|---|
-| graphlens | deepseek-v4-flash | 0.980 | 1.000 | 8,396 | $0.00077 |
-| graphlens | gemma-4-26b | 1.000 | 1.000 | 4,060 | $0.00026 |
-| graphlens | gpt-oss-20b | 0.980 | 1.000 | 4,033 | $0.00014 |
+| graphlens | deepseek-v4-flash | 1.000 | 1.000 | 11,426 | $0.00114 |
+| graphlens | glm-4.7-flash | 0.990 | 1.000 | 16,996 | $0.00112 |
 | codegraph | deepseek-v4-flash | 0.990 | 1.000 | 9,662 | $0.00090 |
-| codegraph | gemma-4-26b | 0.912 | 0.941 | 7,588 | $0.00048 |
-| codegraph | gpt-oss-20b | 0.971 | 1.000 | 11,150 | $0.00035 |
-| semble | deepseek-v4-flash | 0.961 | 0.961 | 12,934 | $0.00121 |
-| semble | gemma-4-26b | 0.647 | 0.696 | 5,800 | $0.00038 |
-| semble | gpt-oss-20b | 0.824 | 0.843 | 12,038 | $0.00041 |
-| none | deepseek-v4-flash | 0.681 | 1.000 | 243 | $0.00004 |
-| none | gemma-4-26b | 0.366 | 0.901 | 115 | $0.00001 |
-| none | gpt-oss-20b | 0.549 | 0.961 | 466 | $0.00005 |
+| codegraph | glm-4.7-flash | 1.000 | 0.990 | 10,363 | $0.00074 |
+| semble | deepseek-v4-flash | 1.000 | 0.961 | 12,934 | $0.00121 |
+| semble | glm-4.7-flash | 0.984 | 0.627 | 9,316 | $0.00070 |
+| none | deepseek-v4-flash | 0.600 | 0.980 | 190 | $0.00003 |
+| none | glm-4.7-flash | 0.639 | 0.706 | 560 | $0.00019 |
 
 </details>
 
@@ -74,18 +80,14 @@ all, most often by exhausting its own output-token budget mid-answer. graphlens 
 
 | arm | model | accuracy | completion | tokens | cost |
 |---|---|---|---|---|---|
-| graphlens | deepseek-v4-flash | 0.921 | 1.000 | 23,436 | $0.00226 |
-| graphlens | gemma-4-26b | 0.899 | 1.000 | 22,430 | $0.00138 |
-| graphlens | gpt-oss-20b | 0.900 | 0.959 | 34,064 | $0.00106 |
-| codegraph | deepseek-v4-flash | 0.939 | 1.000 | 23,212 | $0.00214 |
-| codegraph | gemma-4-26b | 0.847 | 0.959 | 25,287 | $0.00156 |
-| codegraph | gpt-oss-20b | 0.655 | 0.765 | 69,991 | $0.00223 |
-| semble | deepseek-v4-flash | 0.850 | 0.908 | 60,804 | $0.00582 |
-| semble | gemma-4-26b | 0.615 | 0.724 | 21,555 | $0.00136 |
-| semble | gpt-oss-20b | 0.555 | 0.688 | 74,937 | $0.00244 |
-| none | deepseek-v4-flash | 0.685 | 1.000 | 246 | $0.00003 |
-| none | gemma-4-26b | 0.453 | 0.898 | 133 | $0.00001 |
-| none | gpt-oss-20b | 0.529 | 0.917 | 944 | $0.00011 |
+| graphlens | deepseek-v4-flash | 0.971 | 0.990 | 23,436 | $0.00218 |
+| graphlens | glm-4.7-flash | 0.937 | 0.827 | 33,952 | $0.00230 |
+| codegraph | deepseek-v4-flash | 0.963 | 1.000 | 23,212 | $0.00214 |
+| codegraph | glm-4.7-flash | 0.968 | 0.816 | 29,674 | $0.00198 |
+| semble | deepseek-v4-flash | 0.952 | 0.908 | 60,804 | $0.00582 |
+| semble | glm-4.7-flash | 0.960 | 0.306 | 17,942 | $0.00132 |
+| none | deepseek-v4-flash | 0.665 | 0.969 | 285 | $0.00005 |
+| none | glm-4.7-flash | 0.702 | 0.643 | 826 | $0.00029 |
 
 </details>
 
@@ -95,8 +97,10 @@ A run that never finishes — a turn-limit cutoff, a timeout, the model exhausti
 output-token budget — is graded as wrong, same as a run that answered confidently and
 incorrectly. Reporting only accuracy hides *why* a tool scored low: a wide gap between accuracy
 and completion means the tool isn't being out-reasoned so much as it's failing to finish at all.
-This is exactly the failure mode that dominates codegraph's and semble's weak-model numbers
-above, and it's invisible in a bare accuracy column.
+`semble` on the weaker model is the clearest case: its HARD *accuracy* looks fine (0.960) but
+its *completion* is **0.306** — that 0.960 is only over the third of runs that finished, while
+two in three looped on a semantic search the model couldn't turn into an answer. A bare accuracy
+column would hide that collapse entirely; accuracy and completion have to be read together.
 
 ## Statistical significance
 
@@ -109,12 +113,14 @@ runs:
 - a **Wilcoxon signed-rank test** (pairwise): for graphlens vs. each rival specifically, matched
   by `task_id`, with a rank-biserial effect size alongside the p-value.
 
-The pairwise gap between graphlens and codegraph is **not statistically significant** on
-`deepseek-v4-flash` (the strongest model — the two are a real tie there) but becomes
-significant, with a large effect size, on both weaker models — exactly where the headline table
-above shows the widest gap. A per-project heatmap in the same notebook confirms graphlens ranks
-first among all four arms on HARD accuracy in **all ten projects**, so the result isn't one
-favorable repo carrying the average.
+graphlens and codegraph are statistically a **tie** on HARD accuracy for both models — the
+pairwise Wilcoxon gap is small and not significant in either direction (graphlens edges ahead on
+`deepseek-v4-flash`, codegraph on `glm-4.7-flash`). Where the tests bite is graphlens/codegraph
+vs. `semble` on the weaker model and every arm vs. the `none` control: those gaps are large and
+significant. So the defensible claim from this data is *graph-structured context (graphlens or
+codegraph) beats semantic-only search and beats no tools*, not that graphlens beats codegraph —
+on these two models they trade the lead. Re-run the notebook for the exact p-values and effect
+sizes on your own sweep.
 
 ## Why `none` (no tools) is in the comparison
 
@@ -129,7 +135,7 @@ contribution from that noise.
 ```bash
 cd benchmarks
 uv sync
-cp .env.example .env   # add your OPENROUTER_API_KEY
+echo "OPENROUTER_API_KEY=sk-or-..." > .env   # your OpenRouter key
 uv run main.py                       # full sweep (slow, costs real API spend)
 uv run main.py --projects gin echo   # a quick subset
 uv run scripts/report.py             # headline table + Friedman test, from the CLI

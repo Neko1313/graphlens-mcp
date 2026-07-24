@@ -6,37 +6,42 @@ sidebar_position: 6
 
 # Freshness model
 
-A single mechanism keeps the graph current: a **filesystem watcher** (`serve` starts it by
-default; disable with `--no-watch`).
+Freshness is **explicit and incremental**: you (or the agent) re-run the `index` tool on the
+repository, and graphlens updates only what changed. There is no filesystem watcher, no
+background reconcile, and no on-access re-index — the navigation tools (`search`, `info`,
+`relations`) only ever read the stored graph.
 
-## Connected-set re-index
+## Whole-repo analyze, diff-driven write
 
-When a file changes on disk the server re-indexes the **connected set** — the changed file
-plus the files that import it and the files it imports — with one full analyze. Analyzing the
-set together lets the resolver re-link calls *across* those files, so cross-file edges are
-rebuilt correctly rather than left partial. Deleting a file prunes its symbols and refreshes
-its importers.
+Every `index` run re-analyzes the **entire repository**. graphlens can't resolve cross-file
+edges from a subset of files, so re-analyzing the whole project is what lets every call/type
+edge re-link correctly — the blast radius comes for free. What's *written* is only the delta:
 
-There is **no polling** and **no structure-only "skeleton" phase**: every (re)index produces
-the full graph the resolver can give, so a file is `ok` or (toolchain missing) `degraded`.
+- **Unchanged symbols** (same `content_hash`) skip both the graph write and the
+  dominant-cost re-embedding.
+- **Added / changed symbols** are upserted and re-embedded.
+- **Vanished symbols** and their vectors are deleted.
+- **Edges are replaced wholesale** — they carry no embedding cost, so the whole edge set is
+  cleared and rewritten each run, keeping cross-file and cross-language links exact.
 
-## On-access backstop
+Analysis and embedding run **before any destructive write**, so a failed or interrupted index
+leaves the previous graph intact rather than half-updated.
 
-A tool that touches a file the watcher hasn't processed yet triggers the same connected
-re-index on access — so the freshness guarantee holds even with `--no-watch` or before the
-first watch cycle.
+## History is recorded, not overwritten
 
-## Startup reconcile
+Each `index` run also appends the repository's HEAD commit to an append-only **temporal
+version log**. That is what powers the `ref` / `at` time-travel parameters on `info` and
+`relations`: you can read the graph as it was at an earlier indexed commit. A past revision
+returns a symbol's recorded shape (name, kind, file, metadata) and its neighbours of the day,
+but **not** its source text — only the latest graph stores bodies, and `search` is always
+current. See [Navigation](./navigation.md).
 
-An event-based watcher cannot see files created, deleted or edited *while the server was
-down*. So `serve` runs a one-shot **reconcile** at startup: it scans the project, indexes new
-files, prunes vanished ones, and refreshes any that changed — then hands off to the watcher.
+## Practical notes
 
-## Limitations
-
-- **Connected-set, not whole-project, re-link:** a change re-analyzes the changed file with
-  its direct importers and imports, so cross-file edges within that set are correct, but a
-  rename that ripples through several indirection layers — or creating a file that an
-  *unchanged* file already imports — may need a full `reindex` for an exact graph.
-- **Cross-language edges on incremental edits:** synthesized `COMMUNICATES_WITH` edges are
-  rebuilt on a full `reindex`; the boundary-based query still resolves connections in between.
+- To refresh after edits, re-run `index` on the same repo — there is no separate `reindex`
+  tool; re-running `index` *is* the refresh.
+- A no-op fast path skips work entirely when the repository's HEAD already matches what the
+  graph reflects (used mainly by the server-side `repo_url` clone path).
+- Missing language servers (`gopls`, `rust-analyzer`) lower coverage, not freshness: those
+  languages index in `degraded` mode, reported per language in the `index` result's
+  `resolver_status`.

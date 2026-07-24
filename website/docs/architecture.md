@@ -6,162 +6,127 @@ sidebar_position: 7
 
 # Architecture
 
-`graphlens-mcp` is a thin, stateful runtime over the stateless
+`graphlens-mcp` is a stateful runtime over the stateless
 [`graphlens`](https://github.com/Neko1313/graphlens) engine. The engine provides the
 mechanisms (parsing, stable node identity, resolvers, cross-language linking); this product
-owns all storage, freshness and the agent-facing surface. Nothing stateful leaks into the
+owns all storage, freshness, and the agent-facing surface. Nothing stateful leaks into the
 engine.
+
+## Deployment modes
+
+The same binary runs two ways, chosen entirely by environment:
+
+- **Local (zero-infra).** No database DSN set: an embedded **Kuzu** graph + **Milvus Lite**
+  vector store on disk, a single trusted user, no auth. `graphlens-mcp` serves stdio and the
+  agent spawns it. Confirmations use MCP elicitation.
+- **Server (multi-tenant).** Set `DB__GRAPH` (a `neo4j://` DSN) and `DB__VECTOR`: the same
+  ports are backed by host **Neo4j** + **Milvus**, selected at runtime — no code change. The
+  Neo4j backend applies a thin Cypher dialect shim so callers write one query. Run
+  `graphlens-mcp --http` behind an ingress.
 
 ## Components
 
+A feature-sliced layout under `src/` — one top-level package per concern:
+
 ```
-src/graphlens_mcp/
-  cli.py            # init / serve / status / reindex / remove
-  store/            # SQLite: schema, patches, graph queries (CTEs, FTS5)
-  indexer/          # workspace orchestration, resolver lifecycle, concurrency
-  server/           # FastMCP server, tools, Pydantic I/O models
-  agents/           # per-agent MCP config registry (JSON + Codex TOML)
-  skills/           # navigation skill installed into the agent
+src/
+  app/                 # MCPServer wiring (server.py), argparse CLI (cli.py),
+                       #   agent instructions, lifespan (store setup/teardown)
+  features/
+    search/            # each slice = an MCP tool: an adapter (tool + resources)
+    info/              #   over a service, sharing the same store ports
+    relations/
+    projects/          # index / list_projects / remove_project + git clone
+    navigation/        # the six slash-prompt workflows (no new storage)
+  entities/            # request/result Pydantic models, project & commit types
+  shared/common/
+    db/graph|vector|registry   # store ports + Kuzu/Neo4j/Milvus backends
+    indexing/          # pipeline, persist, temporal version log, embeddings
+    setting/           # env config, platformdirs paths
 ```
 
-## Lifecycle
+## Tool & prompt surface
 
-- **`init`** — detect languages → toolchain doctor → full index → persist → write agent
-  config → install skill. Interactive agent selection (checkbox) or `--agent/--yes`.
-- **`serve`** — FastMCP over stdio, launched by the agent. Answers queries from SQLite.
-- **`reindex`** — clear and rebuild the whole graph.
-- **`remove`** — deregister from agents and optionally delete the cache.
+Six MCP tools, all flat-parameter:
 
-## Freshness (watcher-driven)
+- **Navigation** — `search`, `info`, `relations` (read the stored graph).
+- **Projects** — `index`, `list_projects`, `remove_project`.
 
-A single mechanism keeps the graph current: a **filesystem watcher** (`watchfiles`),
-started by `serve` (`Workspace.start_watching`) unless `--no-watch` is passed. On each
-change the watcher calls `Workspace.reindex_connected`, which re-indexes the **connected
-set** of every changed file — the file plus its importers (`get_importer_files`) and its
-imports (`get_imported_files`) — with one full `analyze(files=…)`. Analyzing the set
-together lets the resolver re-link calls *across* those files, so the affected region is a
-full graph, not a single-file approximation. Deletions prune the file and refresh its
-importers. There is **no** structure-only "skeleton" phase: every (re)index is a full
-analyze, so a file is `ok` or (toolchain missing) `degraded`.
+Plus six **navigation prompts** (`impact`, `find`, `trace`, `map`, `xflow`, `deadcode`) that
+encode fixed methods over the navigation tools. See [Agent tools](./agent-tools.md).
 
-`Workspace.ensure_fresh` is the on-access backstop: a tool that touches a changed file
-before the watcher has processed it runs the same `reindex_connected` (deduped through
-`InFlightRegistry`).
+## Indexing pipeline
 
-**Monorepo / workspace routing.** A repo can hold several independent packages of one
-language (a uv / pnpm / cargo workspace). The full index lets each adapter discover those
-per-package roots and keys every node id off the *package* name and its package-relative
-module path. Incremental re-index must use the same roots, so `reindex_connected` groups
-each changed file under its owning package root (`find_language_roots` →
-`_nearest_root`) and analyzes per group. Passing the repo root with `files=` instead would
-collapse the whole workspace into one project, re-keying a member's symbols under the wrong
-name and breaking every cross-file edge into them. A plain single-package repo is one group
-(the project root) and behaves exactly as before.
+`index_project_graph` (in `shared/common/indexing/pipeline.py`) runs, in order:
 
-Because an event-based watcher cannot see changes made while it was not running, `serve`
-calls `Workspace.reconcile` once at startup: it walks the project (`_discover_source_files`,
-excluding `.graphlens`/VCS/build dirs), diffs disk against the `files` table, and feeds the
-new/deleted/edited paths through `reindex_connected`. A wholesale rebuild remains `reindex`.
+1. **Analyze** — the engine parses the whole repository and resolves cross-file edges. A
+   project is a whole git repo; its identity is a hash of the git remote.
+2. **Diff** — new nodes are compared to the stored ones by `content_hash`. Unchanged nodes
+   skip both the graph write and the dominant-cost re-embedding.
+3. **Embed** — changed nodes are embedded (before any destructive write, so a failure leaves
+   the prior index intact).
+4. **Persist** — vectors are upserted to Milvus; graph nodes and edges are written to Kuzu.
+   Vanished nodes and their vectors are deleted; edges are replaced wholesale.
+5. **Version** — the HEAD commit is appended to a temporal version log (below).
 
-## Key invariants
-
-1. **Stable node ids** come from the engine (`make_node_id`) — never positional. This is
-   what lets a cross-file edge reconnect after its target file is re-indexed.
-2. **Path normalization.** Adapters emit mixed `file_path` forms (FILE/MODULE nodes
-   relative, symbol nodes absolute). `_normalize_graph_paths` resolves every path to
-   absolute before persisting, so nothing is dropped and the `files` table has one key
-   per file regardless of the process cwd.
-3. **File-owned writes.** `apply_patch` deletes/replaces only a file's own nodes and the
-   edges sourced from them, so re-indexing one file never touches another.
-4. **Fileless structural pass.** Project/module/boundary nodes (`file_path = NULL`) and
-   their `contains` edges are persisted by `apply_structural` (a separate full-index pass,
-   like cross-language linking), since the per-file ownership filter cannot place them.
-5. **Cross-language edges survive incremental.** `COMMUNICATES_WITH` is synthesized at
-   full index only; `apply_patch` therefore excludes it from its per-file edge delete so
-   it does not erode on incremental re-index. A full `reindex` rebuilds it exactly.
-6. **Dangling edges, no foreign keys.** An edge references its target by stable id, which
-   may be momentarily absent during re-index. There is **no** FK/CASCADE (it would reject
-   such edges); unresolved targets are filtered at read time instead.
-7. **Cycle-safe traversal.** The store's callers/callees/implementors walks use recursive CTEs
-   with a visited-path guard, so cyclic call graphs terminate without exponential blow-up.
-8. **Atomic, rolled-back writes.** Every write runs under `SqliteStore._writing` — the
-   single-writer lock plus commit-on-success / rollback-on-error — so a failed multi-statement
-   patch can never leave a partial transaction for the next writer.
-9. **Resolver off the hot path.** One adapter (and resolver) is pooled per language for the
-   `Workspace` lifetime; `Workspace.close()` shuts down resolver/LSP processes. Queries are
-   served from SQLite, never by invoking a resolver synchronously.
+On Kuzu, node and edge writes use bulk **`COPY`** rather than per-row `UNWIND … MATCH`, which
+keeps a whole-repo index O(n) instead of O(n²) — a superset-scale project that once took tens
+of minutes now indexes in minutes. On Neo4j the `UNWIND` path is used (its index handles it).
 
 ## Storage
 
-SQLite with `nodes`, `edges`, `deps`, `files`, `meta` and an FTS5 index over symbol names. A
-dedicated **writer** connection serializes all writes behind a write lock (so multi-statement
-patches are atomic), while a separate read-only connection serves queries from the last
-committed WAL snapshot without queuing behind an in-flight write. WAL is enabled for
-crash-safety and reader/writer concurrency.
+- **Code graph** — Kuzu (local) or Neo4j (server): a `CodeNode` table and a `Rel` edge table,
+  scoped by `project_id`, plus a `GraphHead` record tracking the indexed commit.
+- **Embeddings** — Milvus / Milvus Lite: a single `CODE_COLLECTION` collection, isolated per
+  project by a `project_id` filter (not a separate collection per project).
+- **Temporal log** — `NodeVersion` / `RelVersion` / `RefState` / `RefCommit` tables record an
+  append-only history per ref, powering `ref` / `at` time-travel on `info` and `relations`. A
+  past revision returns recorded metadata and neighbours, but not source bodies; `search` is
+  always current.
+- **Registry** — an embedded Kuzu `registry.db` mapping project ids to name / path / git url,
+  independent of which backend serves the graph.
 
-## Semantic layer
+Locally these live under platformdirs `user_data_dir` (`$XDG_DATA_HOME/graphlens-mcp/` on
+Linux) as `graph.db`, `vector.db`, `registry.db`.
 
-Lets `search` fall back to matching by **meaning** when name/content matching comes up thin —
-the case that otherwise sends an agent back to grep. It is part of the base install
-(`model2vec` is a core dependency), not an optional extra.
+## Key invariants
 
-- **Content matching** inside `search` is the grep replacement: literal text over file content
-  via ripgrep with a pure-Python fallback. Uses no model at all.
-- **Semantic matching** embeds the graph's **nodes** (functions/methods/classes) directly with
-  the `model2vec` static model (`minishlab/potion-code-16M`) and ranks by in-process **cosine
-  similarity** over a cached vector matrix. There is no file chunking and no chunk→node bridge
-  — *each hit is already a graph node*, so a "found by meaning" result pivots straight into
-  `relations`/`info`.
+1. **Stable node ids** come from the engine — never positional — so a cross-file edge
+   reconnects after its target file is re-indexed.
+2. **Content-hash diff.** Only nodes whose `content_hash` changed are re-written and
+   re-embedded; the stored hash is the last thing written, so an interrupted index self-heals
+   on the next run.
+3. **Whole-repo analyze, wholesale edge replace.** Every index re-analyzes the whole project
+   and clears+rewrites the project's edges, so cross-file and cross-language links stay exact
+   — there is no partial, connected-set re-link to drift out of date.
+4. **Analyze + embed before destructive write.** A failure leaves the previous graph intact.
+5. **Transactional multi-statement writes** on the graph store; the temporal append runs in
+   one transaction, since orphaned rows at a seq would corrupt time-travel reads.
+6. **Uneven per-language coverage is reported, not hidden.** `relations` returns `not_indexed`
+   for groups a language analyzer never produces (Rust: implementors; Go: references) and
+   `callees_unresolved` for calls it couldn't bind.
 
-The float32 vectors are stored **in SQLite** alongside the graph (no sidecar index). The model
-is imported at module top level — so the only graceful-degradation path that remains is a
-**model-download failure** (offline, blocked HF egress): it is stored as a sticky reason and
-surfaced via `available=false`, and the graph server keeps working with name/content matching
-only.
+## Authorization (server mode)
 
-### Unified index cycle & resume
+Pushed outward, on two axes:
 
-`full_index` runs two phases in order — **graph → semantic** — recording a resume checkpoint
-in `meta` after each (`index_phase`, with `index_root_hash` = `files_fingerprint`). The
-semantic phase is best-effort: if the embedding model can't be fetched (offline) the graph
-index still completes and the checkpoint rests at the graph phase. Incremental edits
-(`reindex_connected`) only *mark* the semantic index stale — re-embedding per file save would
-be wasteful — and it rebuilds lazily on the next semantic query. `serve` calls
-`resume_pending_index` after `reconcile`: it finishes an embedding pass a prior crash
-interrupted when the fingerprint still matches, and otherwise marks the layer stale for lazy
-rebuild. This is the checkpoint/resume the project needs for expensive index work without
-taking on a durable-workflow framework (e.g. DBOS).
+- **Write / index** is gated by the git token: no valid `ci_token` → no clone/pull → nothing
+  written for that repo. That token *is* the write ACL.
+- **Read / query** is regulated at the transport by an external OIDC gateway (e.g. Casdoor) in
+  front of the server — a deployment concern, deliberately out of this project's scope. The
+  server builds no session state.
 
 ## Cache, not system of record
 
-The graph is a **regenerable cache** of the code on disk — it is never migrated. The
-store records a schema *fingerprint* combining the engine's model `SCHEMA_VERSION` with a
-local `LOCAL_SCHEMA_VERSION` (bumped on any `schema.sql` change). On mismatch the tables
-are dropped and rebuilt from scratch. This is why there is no Alembic: migrations would be
-pure overhead for a cache you can rebuild in seconds with `reindex`.
+The graph and embeddings are a **regenerable cache** of the code on disk. There are no
+migrations: to change shape, delete the store and re-run `index` — it rebuilds in seconds to
+minutes depending on repo size.
 
 ## Tool boundary
 
-Every MCP tool returns a typed Pydantic model (`server/models.py`). List responses carry
-`resolver_status` (`ok` | `degraded`, aggregated across every returned node's file — there is
-no structure-only "skeleton" state, every index is a full analyze), an `indexing` flag (a
-background reindex is in progress, so edges may be incomplete) and a `truncated` flag; results
-are capped (`MAX_RESULTS`, 200), and an oversized `limit` / `depth` is clamped rather than
-rejected. File-touching tools run the freshness check first; relative paths resolve against
-the project root, not the server cwd.
-
-## Known limitations
-
-- **Connected-set, not whole-project, re-link:** a change re-analyzes the changed file with
-  its direct importers and imports, so cross-file edges within that set are correct, but a
-  change that ripples through several indirection layers may need a full `reindex` for an
-  exact graph. A new file an *unchanged* file already imports is covered by a second importer
-  pass in `reindex_connected`: once the new file is indexed its importers resolve and are
-  re-linked, so the dangling edge into it is rebuilt without a full reindex.
-- **Cross-language edge erosion (mitigated):** `COMMUNICATES_WITH` is synthesized by the
-  full-index link pass, never by single-file analysis, so an incremental patch preserves the
-  edges it cannot re-emit. After each connected-set re-index, `_resynthesize_cross_language`
-  rebuilds the pairwise edges for every boundary the re-indexed files touch (and prunes
-  dangling ones), so a new or renamed exposer/consumer is linked immediately. A full
-  `reindex` remains the exact escape hatch for a participant that leaves a boundary other
-  files still use.
+Each tool returns typed results from `entities/result`: `search` returns text lines (one per
+hit in `concise` mode) or resource links; `info` returns a discriminated union
+(symbol source / file outline / file source / ambiguity candidates / not-found); `relations`
+returns the four navigation groups with `*_total`, `callees_unresolved`, and `not_indexed`.
+Ambiguous names return candidates to narrow with `file`; unknown targets return an explicit
+not-found rather than an empty success.

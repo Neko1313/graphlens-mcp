@@ -10,113 +10,89 @@ sidebar_position: 1
 Status: **semantic search implemented** (part of the base install — no optional extra);
 **clustering removed**. This page captures the design behind the semantic layer so the
 decisions are durable. An earlier draft explored composing the external
-[semble](https://github.com/MinishLab/semble) retriever with a chunk→node bridge;
-the implementation took the simpler path below — embedding graph nodes directly —
-so semble is **not** a dependency.
+[semble](https://github.com/MinishLab/semble) retriever with a chunk→node bridge; the
+implementation took the simpler path below — embedding graph nodes directly — so semble is
+**not** a dependency.
 
 ## Goal
 
-Make `graphlens-mcp` complete enough that an agent can stop reaching for raw
-`grep` and file reads. The structural graph already answers *who calls X / what
-breaks if I change it*. Two gaps pushed agents back to `grep`:
+Make `graphlens-mcp` complete enough that an agent can stop reaching for raw `grep` and file
+reads. The structural graph already answers *who calls X / what breaks if I change it*. Two
+gaps otherwise pushed agents back to `grep`:
 
-1. **No content search.** The FTS index covers only symbol *names*
-   (`name`, `qualified_name`) — not function bodies, string literals,
-   comments, logs, or config. Anything inside a body was invisible.
-2. **No search by meaning.** "find the retry-with-backoff logic" has no entry
-   point when you don't know the symbol name.
+1. **No content search.** Name matching covers only symbol names — not function bodies,
+   string literals, comments, logs, or config.
+2. **No search by meaning.** "find the retry-with-backoff logic" has no entry point when you
+   don't know the symbol name.
 
-Both are folded into the single `search` tool today: content matching (literal, via
-ripgrep) and semantic matching (meaning, via node embeddings) are two of the three ways
-`search` can match a query, alongside name matching — the agent doesn't pick a different
-tool for each, `search` tries all three and returns graph nodes either way.
+Both are folded into the single `search` tool: name matching, literal content matching (via
+ripgrep), and semantic matching (via node embeddings) are tried together and all return graph
+nodes, so the agent doesn't pick a different tool for each.
 
 ## Direct node embeddings (no chunk bridge)
 
-The key simplification over an external chunk retriever: graphlens already has
-the units we care about — **graph nodes** (functions/methods/classes). So we
-embed the nodes themselves rather than file chunks:
+The key simplification over an external chunk retriever: graphlens already has the units we
+care about — **graph nodes** (functions/methods/classes). So we embed the nodes themselves
+rather than file chunks:
 
-- Each node's embedding text is `qualified_name` + signature + a docstring
-  summary, embedded with the `model2vec` static model (`minishlab/potion-code-16M`,
-  CPU-only, ~ms queries). The float32 vectors are stored **in SQLite** next to
-  the graph — there is no sidecar index.
-- `search`'s semantic fallback loads the vectors into a cached matrix and does
-  in-process **cosine similarity**. A hit is a node id directly — no
-  `(file, line-range)` chunk, no overlap-to-node mapping step.
+- Each node's embedding text (`embed_text` in `shared/common/indexing/embed.py`) combines the
+  node **kind** + `qualified_name`, identifier tokens split from the qualified name, the
+  **signature**, the **docstring**, and — described in code as the strongest signal — a
+  **source-body snippet** sliced from the node's span, truncated to ~1500 chars. It is
+  embedded with the `model2vec` static model (`minishlab/potion-code-16M`, CPU-only, ~ms
+  queries).
+- The vectors live in **Milvus** — Milvus Lite on disk locally, a Milvus server when
+  `DB__VECTOR` is set — as a single collection (`CODE_COLLECTION`) isolated per project by a
+  `project_id` filter. This is a dedicated vector index alongside the Kuzu code graph, not
+  vectors stuffed into the graph store.
+- `search` encodes the query and issues a **vector search against the Milvus collection**
+  (scoped by the project filter); Milvus returns ranked node ids. A hit is a node id directly
+  — no `(file, line-range)` chunk, no overlap-to-node mapping — so a "found by meaning" result
+  pivots straight into `relations` / `info`.
 
 ## Clustering — tried, then removed
 
-An earlier iteration also ran the same node vectors through **HDBSCAN**
-(scikit-learn) to auto-label dense semantic zones ("auth", "serialization", …),
-exposed as `list_clusters`/`get_cluster` tools. It was removed:
+An earlier iteration also ran the same node vectors through **HDBSCAN** (scikit-learn) to
+auto-label dense semantic zones ("auth", "serialization", …), exposed as
+`list_clusters`/`get_cluster` tools. It was removed:
 
-- The engine consolidated the agent-facing surface down to three tools
-  (`search`/`relations`/`info`) after benchmarking showed the smaller, denser
-  surface was easier for weaker models to use correctly — clustering added two
-  tools whose value (browsing "zones") didn't pay for the extra tool-choice
-  surface or the `scikit-learn`/HDBSCAN dependency weight.
-- `search`'s semantic fallback already covers "find code by meaning" without a
-  clustering pass; clustering was additive browsing, not a required capability.
+- The navigation surface was kept small and dense — `search` / `relations` / `info` — after
+  benchmarking showed weaker models use a smaller surface more reliably. Clustering added two
+  tools whose value (browsing "zones") didn't pay for the extra tool-choice surface or the
+  `scikit-learn`/HDBSCAN dependency weight.
+- `search`'s semantic matching already covers "find code by meaning" without a clustering
+  pass; clustering was additive browsing, not a required capability.
 
-`scikit-learn` and HDBSCAN are no longer dependencies; the `clusters`/`node_clusters`
-tables and their store methods no longer exist. This section is kept as a durable record
-of the tradeoff, not as current behavior.
+`scikit-learn` and HDBSCAN are no longer dependencies. This section is kept as a durable
+record of the tradeoff, not as current behavior. (The full tool surface today is six tools —
+these three navigation tools plus `index` / `list_projects` / `remove_project` for project
+management.)
 
-## Unified index cycle
+## Index cycle
 
-One pipeline, two phases, driven by the existing index entry points:
+Embedding is a step of the one indexing pipeline (`index_project_graph`), not a separate
+phase to resume:
 
-```
-full_index():
-  graph     (graphlens analyze + persist)        ← existing
-  semantic  (embed nodes → store vectors)         ← new
-```
-
-- **Incremental edits** (`reindex_connected`, watcher/on-access) mark the
-  semantic vectors *stale* rather than rebuilding them per save — re-embedding
-  on every keystroke would be wasteful. They rebuild lazily on the next
-  semantic-matching `search` call.
-- **`full_index`** runs both eagerly so init/reindex leave a complete,
-  consistent cache.
-
-## Checkpoint / resume (no DBOS)
-
-The graph index and semantic embedding pass are expensive; a crash midway should not throw
-the work away. We considered DBOS for durable workflows — it now has a SQLite
-backend (`dbos[aiosqlite]`) — but it is marked dev-only for SQLite and pulls in
-sqlalchemy/websockets/typer plus a second DB file. For a two-stage pipeline
-that was disproportionate.
-
-Instead we checkpoint in the graph's own `meta` table (the same regenerable
-cache, zero new deps):
-
-| key | value |
-|---|---|
-| `index_phase` | `indexing` → `graph` → `done` |
-| `index_root_hash` | fingerprint of the indexed file set (`files_fingerprint`) |
-
-`resume_pending_index()` runs at `serve` start (after `reconcile`): if the last
-run completed the graph but died before the semantic embed pass — and the fingerprint
-still matches — it finishes only the unfinished tail. If the tree changed while the
-server was down, `reconcile` has already patched the graph, so the semantic
-vectors are simply marked stale and rebuilt lazily.
+- The pipeline diffs the freshly analyzed graph against what's stored by `content_hash` and
+  **re-embeds only nodes whose content changed** — unchanged nodes are skipped, which is the
+  dominant cost saving on a re-index. This happens eagerly within the index run; there is no
+  lazy on-search rebuild and no stale-marking.
+- Embedding runs **before any destructive write**: vectors and graph are computed, then the
+  old vectors/nodes are replaced. So a crash mid-index leaves the previous, consistent cache
+  in place — crash-safety by ordering, not by a checkpoint table.
 
 ## Dependencies & degradation
 
-`model2vec` is a **core dependency** — there is no optional extra. `indexer/semantic.py`
-imports it at module top level. The only graceful-degradation path that remains is a
-**model-download failure** (offline, blocked HF egress, no `HF_TOKEN`): it is stored as a
-sticky reason and the semantic fallback returns `available=false` with that reason,
-steering `search` back to name/content matching only while the graph server keeps working.
+`model2vec` is a **core dependency** — there is no optional extra. The model is loaded at the
+top of `shared/common/indexing/embed.py` and fetched from HuggingFace on first use, then
+cached. Note the current limitation: `search` calls `encode(...)` inline with no fallback, so
+if the model cannot be fetched (offline first run, blocked HF egress) the `search` call errors
+rather than silently degrading to name/content matching. Pre-warming the model cache avoids
+this on air-gapped hosts.
 
 ## Testing under a blocked model host
 
-The embedding model is fetched from HuggingFace at runtime, which may be
-blocked (CI/sandboxed egress). Tests therefore:
-
-- always run the pure logic (tokenizer, the store vectors/fingerprint, and content
-  matching (ripgrep));
-- exercise the embed path with a **monkeypatched model** so graceful degradation and
-  the full checkpoint state machine are covered offline;
-- gate any real-model end-to-end check behind model availability.
+The embedding model is fetched from HuggingFace at runtime, which may be blocked
+(CI/sandboxed egress). Tests therefore run the pure logic (tokenizer, store round-trips,
+content matching) unconditionally, exercise the embed path with a monkeypatched model offline,
+and gate any real-model end-to-end check behind model availability.

@@ -60,26 +60,28 @@ cross-file questions, and reports accuracy **alongside** token / tool-call / dol
 because a cheaper arm at equal accuracy wins.
 
 <!-- BENCHMARK-RESULTS:START -->
-> 📊 **Results** (10 repos · 3 models, strong → genuinely weak · ~2,400 graded runs —
-> full breakdown, significance tests and reproduction steps at
+> 📊 **Results** (10 repos · 2 models, a strong one and a weaker one · ~1,600 graded runs —
+> ranges are `deepseek-v4-flash` ↔ `glm-4.7-flash`; full breakdown and reproduction steps at
 > [**docs: Benchmarks**](https://neko1313.github.io/graphlens-mcp/benchmarks)):
 >
 > | | SIMPLE accuracy | HARD accuracy | HARD tokens (median) | HARD completion |
 > |---|---|---|---|---|
-> | **graphlens** | 0.980 – 1.000 | 0.899 – 0.921 | **22.4k – 34.1k** | **≥ 0.959 on every model** |
-> | codegraph | 0.912 – 0.990 | 0.655 – 0.939 | 23.2k – 70.0k | drops to 0.765 on the weakest model |
-> | semble | 0.647 – 0.961 | 0.555 – 0.850 | 21.6k – 74.9k | drops to 0.688 on the weakest model |
-> | none (control) | 0.366 – 0.681 | 0.453 – 0.685 | 0.1k – 0.9k | — |
+> | **graphlens** | 0.990 – 1.000 | 0.937 – 0.971 | 21.9k – 34.0k | 0.827 – 0.990 |
+> | codegraph | 0.990 – 1.000 | 0.963 – 0.968 | 23.2k – 29.7k | 0.816 – 1.000 |
+> | semble | 0.984 – 1.000 | 0.952 – 0.960 | 17.9k – 60.8k | **0.306** – 0.908 |
+> | none (control) | 0.600 – 0.639 | 0.665 – 0.702 | 0.3k – 0.8k | — |
 >
-> Accuracy alone hides the number that matters to a bill: **tokens paid per task**. graphlens's
-> HARD-tier token spend stays flat (22k–34k) whether the driving model is strong or weak;
-> codegraph's and semble's balloon past 70k on the weakest model — more than double
-> graphlens's ceiling — for a *worse* answer, not a better one. graphlens is the only arm that
-> stays clearly ahead of the no-tools control **and** keeps completion above 0.95 at every
-> model tier: on the weakest model tested (gpt-oss-20b) it holds 0.900 HARD accuracy at
-> roughly **half the token cost** of codegraph. Pairwise Wilcoxon signed-rank tests (matched by
-> task) confirm the gap is statistically significant on the weaker models, not an artifact of a
-> few outlier tasks — see the notebook for per-model p-values and effect sizes.
+> The model is held constant across arms, so the only variable is the tool surface. On the
+> **strong** model graphlens leads — SIMPLE 1.000, HARD 0.971 at the lowest token cost of the
+> real arms. On the **weaker** model graphlens and codegraph are a close race (codegraph nudges
+> ahead on HARD accuracy, graphlens on completion) — the two graph-based arms both hold up,
+> where **semble collapses**: its HARD completion falls to **0.306** (two runs in three never
+> finish, looping on semantic hits the weak model can't synthesise). So the robust finding is
+> *graph-structured context degrades gracefully with model strength; semantic-only search does
+> not*. Every real arm clears the no-tools control by a wide margin (graphlens lift **+0.31–0.40
+> HARD**). graphlens's own cost tail is a few *impact/enumeration* tasks where the model spirals
+> in `search`; upgrading the engine to `graphlens 0.8.2` (Rust `implementors`, Go `references`,
+> TS barrel/type edges) cut those sharply — e.g. `hono_impact_getpath` from 486k to 111k tokens.
 <!-- BENCHMARK-RESULTS:END -->
 
 ## Install
@@ -158,7 +160,7 @@ Three **query** tools — everything a symbol or file needs comes back as a navi
 
 | Tool | Purpose |
 |---|---|
-| `search` | Find code by NAME, CONTENT, or MEANING — **the one way in**. Returns graph nodes with their signature (often enough to answer without a follow-up call). Content is matched literally, not as a regex. Scope with `path_glob` (e.g. `"tests/*"`, `"*.ts"`, `"!tests/*"` to exclude a subtree); set `exhaustive=true` to list every matching file (no cap, no signatures) instead of the ranked top-N |
+| `search` | Find code by NAME, CONTENT, or MEANING — **the one way in**. Returns graph nodes with their signature (often enough to answer without a follow-up call). Content is matched literally, not as a regex. Scope with `path_glob`, a literal pathlib glob (e.g. `src/**/*.py`) — `*` doesn't cross `/`, so nested files need `**`, and there's no `!`-negation; test files are excluded by default, and a glob that names them (`**/*_test.go`) opts them back in. Set `exhaustive=true` to list every in-scope file path instead of the ranked top-N |
 | `relations` | A symbol's neighbourhood in one call: callers, callees, implementors/subclasses, and non-call references — each with its signature. **The** impact-analysis tool ("what breaks if I change X?", "what implements X?") |
 | `info` | Read a specific target: a symbol (node id or name) → source + signature + location; a file path → its symbol outline |
 
@@ -166,11 +168,11 @@ Three **query** tools — everything a symbol or file needs comes back as a navi
 current code — see [History](#history).
 
 `search` and `relations` accept either a symbol **name** or a node id directly — you don't
-need to look up a node id first. Both cap their response size (a large hit set is ranked by
-relevance via a small bundled embedding model, not just truncated) and surface true counts
-(`callers_total`, `references_total`, …) when a list is capped, so the agent sees "15 shown
-of 22" instead of guessing. If the embedding model can't be fetched (e.g. a first run with no
-network), search transparently falls back to name/content matching.
+need to look up a node id first. A large hit set is ranked by relevance via a small
+`model2vec` embedding model (`minishlab/potion-code-16M`), which is fetched from HuggingFace
+on first use and cached; relation lists surface true counts (`callers_total`,
+`references_total`, …) so the agent sees "15 shown of 22" instead of guessing. Note: the
+embedding model is required for the semantic pass — pre-warm its cache for air-gapped hosts.
 
 Three **management** tools — `index` (add or refresh a project), `list_projects`, and
 `remove_project` — round out the surface, plus six **workflow prompts** (`/impact`, `/find`,
