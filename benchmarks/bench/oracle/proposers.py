@@ -50,14 +50,21 @@ def _esc(symbol: str) -> str:
     return re.escape(symbol)
 
 
+_DOCSTRING = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'')
+
+
 def _strip_comment_lines(text: str) -> str:
     """
-    Drop whole-line comments before call-site counting.
+    Drop comments and docstrings before call-site counting.
 
     Doc-example mentions (Rust `/// foo()`, Python `# foo()`) must not count as
-    real calls. Conservative: only removes lines whose first non-space chars are
-    a comment marker.
+    real calls. Line comments are dropped conservatively — only when the first
+    non-space chars are a comment marker — but Python's doc *examples* live in
+    triple-quoted blocks, which no line rule catches: click's `Context.scope`
+    docstring shows `assert get_current_context() is ctx` twice, and counting
+    those put core.py in a gold impact set it does not belong in.
     """
+    text = _DOCSTRING.sub("", text)
     out = []
     for line in text.splitlines():
         s = line.lstrip()

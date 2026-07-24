@@ -28,8 +28,10 @@ class Project:
     repo: str  # "owner/name" on github.com
     tag: str  # immutable git tag — gold is verified at this tag
     languages: tuple[str, ...]  # drives oracle + applicable task kinds
-    # Subpath the MCP servers analyze. "." = whole repo. Scoping keeps huge repos
-    # (superset) honest and indexing fast, and is applied identically to every arm.
+    # Subpath the MCP servers analyze. Now always "." — graphlens identifies a
+    # project by its git remote and indexes the whole repository, so a subpath
+    # arm would be measuring a different corpus than the others. Kept as a field
+    # (not deleted) because analyze_path is threaded through every arm.
     subdir: str = "."
     notes: str = ""
 
@@ -83,7 +85,6 @@ PROJECTS: dict[str, Project] = {
         repo="fastapi/fastapi",
         tag="0.115.0",
         languages=("python",),
-        subdir="fastapi",
         notes="Python framework — Pydantic models, dependency injection, decorators.",
     ),
     "click": Project(
@@ -91,7 +92,6 @@ PROJECTS: dict[str, Project] = {
         repo="pallets/click",
         tag="8.1.7",
         languages=("python",),
-        subdir="src/click",
         notes="Python CLI toolkit — decorators, Command/Context classes.",
     ),
     "httpx": Project(
@@ -99,7 +99,6 @@ PROJECTS: dict[str, Project] = {
         repo="encode/httpx",
         tag="0.27.2",
         languages=("python",),
-        subdir="httpx",
         notes="Python HTTP client — sync/async Client classes, transports.",
     ),
     # --- TypeScript ---
@@ -108,7 +107,6 @@ PROJECTS: dict[str, Project] = {
         repo="honojs/hono",
         tag="v4.6.0",
         languages=("typescript",),
-        subdir="src",
         notes="TypeScript web framework — generics-heavy, middleware, type-level routing.",
     ),
     "zod": Project(
@@ -116,7 +114,6 @@ PROJECTS: dict[str, Project] = {
         repo="colinhacks/zod",
         tag="v3.23.8",
         languages=("typescript",),
-        subdir="src",
         notes="TypeScript schema validation — class hierarchy, generics.",
     ),
     "superset": Project(

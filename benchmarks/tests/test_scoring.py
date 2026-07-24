@@ -65,3 +65,60 @@ def test_line_mode_snake_case():
     assert score(ans, {"answer_set": gold, "match": "line"}) == pytest.approx(
         1.0
     )
+
+
+def test_a_fenced_final_list_is_the_answer_not_the_reasoning():
+    # An explanation that names a file in order to EXCLUDE it must not be
+    # counted as listing it: the model fenced its actual answer, so that block
+    # is what gets graded.
+    answer = (
+        "core.py only mentions it in docstrings, so it is excluded.\n"
+        "```\nglobals.py\ndecorators.py\n```"
+    )
+    expected = {"answer_set": ["globals.py", "decorators.py"], "match": "path"}
+    assert score(answer, expected) == 1.0
+
+
+def test_an_unfenced_answer_is_still_graded_whole():
+    answer = "globals.py\ndecorators.py"
+    expected = {"answer_set": ["globals.py", "decorators.py"], "match": "path"}
+    assert score(answer, expected) == 1.0
+
+
+def test_a_quoted_code_snippet_is_not_mistaken_for_the_answer():
+    # Models fence source they are quoting, then list the files in plain text.
+    # Only a fence that ends the message delimits an answer.
+    answer = (
+        "Two files call it:\n\n`request.ts` — calls it here:\n"
+        "```ts\nreturn parseBody(this, options)\n```\n\n"
+        "request.ts\nmiddleware/method-override/index.ts"
+    )
+    expected = {
+        "answer_set": ["request.ts", "middleware/method-override/index.ts"],
+        "match": "path",
+    }
+    assert score(answer, expected) == 1.0
+
+
+def test_the_trailing_bare_list_is_the_answer():
+    # Asked for one item per line, models explain and then list. The files
+    # named in the explanation to RULE THEM OUT are not claims.
+    answer = (
+        "The test files also import getPath, but the question excludes them.\n"
+        "`src/adapter/aws-lambda/handler.ts` defines its own getPath — "
+        "unrelated.\n\n"
+        "src/hono-base.ts\nsrc/middleware/logger/index.ts"
+    )
+    expected = {
+        "answer_set": ["hono-base.ts", "middleware/logger/index.ts"],
+        "match": "path",
+    }
+    assert score(answer, expected) == 1.0
+
+
+def test_a_prose_only_answer_is_still_graded_whole():
+    # No fence and no bare list: nothing to narrow to, so the whole message
+    # stands as the claim — a rambling answer is not rescued by the rule.
+    answer = "It is called from globals.py and from decorators.py, I think."
+    expected = {"answer_set": ["globals.py", "decorators.py"], "match": "path"}
+    assert score(answer, expected) == 1.0

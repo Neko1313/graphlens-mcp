@@ -63,6 +63,63 @@ def _normalize_path(s: str) -> str:
     return s.strip().strip("`'\"").lstrip("./").lower()
 
 
+_TRAILING_FENCE_RE = re.compile(
+    r"```[a-zA-Z0-9_+-]*\n(.*?)```\s*\Z",
+    re.DOTALL,
+)
+
+
+def _final_answer(answer: str) -> str:
+    """
+    Return the model's own delimitation of its answer, if it gave one.
+
+    The system prompt asks for the bare list, but models routinely reason first
+    and then fence the list. Scoring the whole message makes precision measure
+    the *prose*: an answer whose explanation says "core.py only mentions it in
+    docstrings, so it is excluded" was scored as if it had listed core.py — the
+    reasoning that got the answer right is what dragged the score down, and two
+    identical conclusions graded differently because one explained itself more.
+
+    Only a fence that *ends* the message counts. Fences are also how models
+    quote source, and an answer that showed a ```ts snippet mid-explanation
+    and then listed its files in plain text scored 0 when the snippet was
+    mistaken for the answer.
+    """
+    match = _TRAILING_FENCE_RE.search(answer)
+    if match:
+        return match.group(1)
+    tail = _trailing_list(answer)
+    return tail if tail else answer
+
+
+def _is_item_line(line: str) -> bool:
+    """Whether a line is a bare list item: one short token, no sentence."""
+    item = _BULLET_RE.sub("", line).strip().strip("`'\"")
+    return bool(item) and len(item) <= _MAX_ITEM_LEN and " " not in item
+
+
+def _trailing_list(answer: str) -> str:
+    """
+    Return the run of bare list lines the message ends with, if any.
+
+    The other half of the same problem as the fence: asked for one item per
+    line, a model explains itself and *then* lists. Everything above the list
+    is reasoning — including the files it names in order to rule them out —
+    and grading it as claims is what turned a correct answer into a 0.25.
+    """
+    lines = answer.strip().splitlines()
+    tail: list[str] = []
+    for line in reversed(lines):
+        if not line.strip():
+            if tail:
+                break
+            continue
+        if not _is_item_line(line):
+            break
+        tail.append(line)
+    return "\n".join(reversed(tail))
+
+
 def _extract(answer: str, mode: str) -> set[str]:
     """Candidate items the answer *claims* — used for the precision denominator."""
     if mode == "path":
@@ -96,11 +153,12 @@ def score(answer: str, expected: dict) -> float:
         mode = expected.get("match") or _detect_mode(gold_set)
         norm = _normalize_path if mode == "path" else str.lower
         gset = {norm(g) for g in gold_set}
-        listed = _extract(answer, mode)
+        final = _final_answer(answer)
+        listed = _extract(final, mode)
         found = len(gset & listed)
         # Recall is also credited for substring presence (model may phrase loosely),
         # but precision is judged on the extracted `listed` set.
-        a_low = answer.lower()
+        a_low = final.lower()
         substr_found = {g for g in gset if g in a_low}
         found = max(found, len(substr_found))
         return _f1(found, max(len(listed), found), len(gset))

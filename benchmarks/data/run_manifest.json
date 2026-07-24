@@ -1,9 +1,7 @@
 {
   "engine": "pydantic-ai + OpenRouter",
   "models": {
-    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
-    "gemma-4-26b": "google/gemma-4-26b-a4b-it",
-    "gpt-oss-20b": "openai/gpt-oss-20b"
+    "glm-4.7-flash": "z-ai/glm-4.7-flash"
   },
   "arms": [
     "graphlens",
@@ -26,6 +24,20 @@
         "go"
       ]
     },
+    "click": {
+      "repo": "pallets/click",
+      "tag": "8.1.7",
+      "languages": [
+        "python"
+      ]
+    },
+    "zod": {
+      "repo": "colinhacks/zod",
+      "tag": "v3.23.8",
+      "languages": [
+        "typescript"
+      ]
+    },
     "ripgrep": {
       "repo": "BurntSushi/ripgrep",
       "tag": "14.1.1",
@@ -38,20 +50,6 @@
       "tag": "v4.5.20",
       "languages": [
         "rust"
-      ]
-    },
-    "fastapi": {
-      "repo": "fastapi/fastapi",
-      "tag": "0.115.0",
-      "languages": [
-        "python"
-      ]
-    },
-    "click": {
-      "repo": "pallets/click",
-      "tag": "8.1.7",
-      "languages": [
-        "python"
       ]
     },
     "httpx": {
@@ -68,11 +66,11 @@
         "typescript"
       ]
     },
-    "zod": {
-      "repo": "colinhacks/zod",
-      "tag": "v3.23.8",
+    "fastapi": {
+      "repo": "fastapi/fastapi",
+      "tag": "0.115.0",
       "languages": [
-        "typescript"
+        "python"
       ]
     },
     "superset": {

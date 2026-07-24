@@ -243,6 +243,20 @@ class ArmSession:
                 transport,
                 id=f"{project.key}:{arm.name}",
                 read_timeout=config.MCP_TOOL_TIMEOUT_S,
+                # Whether the server's MCP `instructions` are injected into the
+                # agent. OFF by default: it must match how the archived rival
+                # arms (semble/codegraph) were measured, or the comparison is no
+                # longer apples-to-apples — and injecting ~2 KB of guidance
+                # measurably destabilises weak models' tool-calling (gpt-oss
+                # leaks Harmony channel tokens into tool names; completion fell
+                # from 0.98 to 0.40), penalising exactly the weak-model tier the
+                # benchmark stresses. graphlens's real gains (flat params, the
+                # test filter, direct-caller default, "relations is the answer"
+                # in the tool docstrings, compact search output) travel in the
+                # tool schema itself, which is always sent regardless. Set
+                # BENCH_INCLUDE_INSTRUCTIONS=1 to measure the with-instructions
+                # deployment instead.
+                include_instructions=config.INCLUDE_INSTRUCTIONS,
                 # Generous: a big graph (superset's 182MB) takes a while to load
                 # before the server answers the MCP handshake.
                 init_timeout=300,
@@ -316,6 +330,13 @@ class ArmSession:
         answer = (result.output or "").strip()
         if not answer:
             answer = ERR_RUN_ERROR
+        elif _is_provider_error(answer):
+            # OpenRouter sometimes returns an upstream error *as the model's
+            # text* ("Connect timeout, please try again later.") on an
+            # otherwise-successful call. Scored literally it is a 0 that looks
+            # like a wrong answer; caught here it is an error row, excluded
+            # from accuracy and re-run on the next pass like any other failure.
+            answer = f"{ERR_RUN_ERROR} provider: {answer}"[:200]
         elif n_calls == 0 and not self.arm.is_control:
             # A real arm answered without ever touching a tool — likely from memory,
             # or the MCP server exposed no tools. Either way the comparison is void.
@@ -342,6 +363,29 @@ class ArmSession:
             tool_calls=trace,
             wall_s=wall,
         )
+
+
+# Upstream-error phrasings OpenRouter passes through as model text. Matched
+# only against a short output — a real answer is symbol names and paths, never
+# a full "please try again later" sentence — so a legitimate answer that
+# happens to contain one of these words is not misread as a failure.
+_PROVIDER_ERROR_PHRASES = (
+    "connect timeout",
+    "please try again later",
+    "upstream error",
+    "internal server error",
+    "service unavailable",
+    "no endpoints found",
+    "rate limit",
+)
+_PROVIDER_ERROR_MAX_LEN = 200
+
+
+def _is_provider_error(answer: str) -> bool:
+    low = answer.lower()
+    return len(answer) <= _PROVIDER_ERROR_MAX_LEN and any(
+        phrase in low for phrase in _PROVIDER_ERROR_PHRASES
+    )
 
 
 def _classify_error(exc: Exception) -> str:

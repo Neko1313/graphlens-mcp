@@ -6,6 +6,7 @@ Layout (all relative to the `benchmarks/` directory, `ROOT`):
     benchmarks/
       bench/            this package (config, arms, models, projects, runner, scoring, oracle)
       targets/          cloned target codebases (git-ignored, built by main.py)
+      .stores/          per-target graphlens stores (git-ignored, built by setup)
       tasks/            *.jsonl task sets, one file per project
       data/             result JSONL (committed) + manifest + index costs
       scripts/          smoke_one, build_gold, run_all.sh, stop.sh
@@ -22,6 +23,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGETS_DIR = ROOT / "targets"
 TASKS_DIR = ROOT / "tasks"
 DATA_DIR = ROOT / "data"
+# Per-project graphlens stores (graph + vectors + registry), one directory per
+# target so each server sees exactly one indexed project. Rebuildable, so it is
+# git-ignored — unlike data/, which holds the committed results.
+STORES_DIR = ROOT / ".stores"
 
 # Load benchmarks/.env if present (OPENROUTER_API_KEY lives there or in the shell env).
 load_dotenv(ROOT / ".env")
@@ -94,3 +99,10 @@ MCP_TOOL_TIMEOUT_S = float(os.environ.get("BENCH_MCP_TOOL_TIMEOUT", "60"))
 
 # Token budget used by the TokenBudget evaluator (reported, not pass/fail-gating).
 TOKEN_BUDGET = int(os.environ.get("BENCH_TOKEN_BUDGET", "8000"))
+
+# Inject each MCP server's `instructions` into the agent? Off by default so the
+# arm ranking stays apples-to-apples with the archived semble/codegraph runs
+# (which had no instructions) and so weak-model tool-calling isn't destabilised
+# by a wall of guidance. Set BENCH_INCLUDE_INSTRUCTIONS=1 to measure the
+# realistic with-instructions deployment (real clients surface them).
+INCLUDE_INSTRUCTIONS = os.environ.get("BENCH_INCLUDE_INSTRUCTIONS", "0") == "1"
