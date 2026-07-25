@@ -66,22 +66,24 @@ because a cheaper arm at equal accuracy wins.
 >
 > | | SIMPLE accuracy | HARD accuracy | HARD tokens (median) | HARD completion |
 > |---|---|---|---|---|
-> | **graphlens** | 0.990 – 1.000 | 0.937 – 0.971 | 21.9k – 34.0k | 0.827 – 0.990 |
+> | **graphlens** | 1.000 – 1.000 | 0.935 – 0.954 | 21.3k – 44.2k | 0.776 – 1.000 |
 > | codegraph | 0.990 – 1.000 | 0.963 – 0.968 | 23.2k – 29.7k | 0.816 – 1.000 |
 > | semble | 0.984 – 1.000 | 0.952 – 0.960 | 17.9k – 60.8k | **0.306** – 0.908 |
 > | none (control) | 0.600 – 0.639 | 0.665 – 0.702 | 0.3k – 0.8k | — |
 >
 > The model is held constant across arms, so the only variable is the tool surface. On the
-> **strong** model graphlens leads — SIMPLE 1.000, HARD 0.971 at the lowest token cost of the
-> real arms. On the **weaker** model graphlens and codegraph are a close race (codegraph nudges
-> ahead on HARD accuracy, graphlens on completion) — the two graph-based arms both hold up,
-> where **semble collapses**: its HARD completion falls to **0.306** (two runs in three never
-> finish, looping on semantic hits the weak model can't synthesise). So the robust finding is
-> *graph-structured context degrades gracefully with model strength; semantic-only search does
-> not*. Every real arm clears the no-tools control by a wide margin (graphlens lift **+0.31–0.40
-> HARD**). graphlens's own cost tail is a few *impact/enumeration* tasks where the model spirals
-> in `search`; upgrading the engine to `graphlens 0.8.2` (Rust `implementors`, Go `references`,
-> TS barrel/type edges) cut those sharply — e.g. `hono_impact_getpath` from 486k to 111k tokens.
+> **strong** model graphlens leads — SIMPLE 1.000, HARD 0.954 at **1.000 completion** and the
+> lowest token cost of the real arms (21.3k). On the **weaker** model the two graph-based arms
+> both clear semble comfortably, but **codegraph edges graphlens on HARD** — accuracy 0.968 vs
+> 0.935 and completion 0.816 vs 0.776 — because graphlens's *impact/enumeration* tasks spiral on
+> a weak model, dragging its glm HARD token tail to 44.2k. **semble collapses** outright: its HARD
+> completion falls to **0.306** (two runs in three never finish, looping on semantic hits the weak
+> model can't synthesise). So the robust finding is *graph-structured context degrades gracefully
+> with model strength; semantic-only search does not* — not that graphlens beats codegraph, which
+> on these two models trade the lead. Every real arm clears the no-tools control by a wide margin
+> (graphlens HARD lift **+0.23–0.29**). Upgrading the engine to `graphlens 0.8.2` (Rust
+> `implementors`, Go `references`, TS barrel/type edges) cut the worst tails sharply — e.g.
+> `hono_impact_getpath` from 486k to 111k tokens.
 <!-- BENCHMARK-RESULTS:END -->
 
 ## Install

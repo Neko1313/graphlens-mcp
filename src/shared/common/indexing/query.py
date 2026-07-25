@@ -6,6 +6,14 @@ from shared.common.indexing import temporal
 __all__ = ["resolve_symbol", "resolve_symbol_at"]
 
 _DEFINITION_KINDS = frozenset({"class", "function", "method"})
+# An ``external_symbol`` is an unresolved reference (a phantom with no body and
+# no callers) and an ``import`` is a statement, not a definition. Both share
+# the imported symbol's name, so resolving "parseBody" would otherwise hand
+# back the phantom and every import beside the real function — noise a weak
+# model then spirals on. Drop them from candidates, keeping them only as a
+# last resort when nothing else carries the name (a lone external symbol still
+# resolves).
+_NOISE_KINDS = frozenset({"external_symbol", "import"})
 _CANDIDATE_LIMIT = 25
 
 
@@ -14,14 +22,17 @@ def _pick(
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """One candidate wins outright, or the whole list goes back to the caller.
 
-    Prefer a lone definition over its imports/references of the same name.
+    Prefer a lone definition over its imports/references of the same name, and
+    drop phantom/import noise so an ambiguous list holds only real symbols.
     """
-    if len(candidates) == 1:
-        return str(candidates[0]["id"]), []
-    defs = [c for c in candidates if c["kind"] in _DEFINITION_KINDS]
+    signal = [c for c in candidates if c["kind"] not in _NOISE_KINDS]
+    pool = signal or candidates
+    if len(pool) == 1:
+        return str(pool[0]["id"]), []
+    defs = [c for c in pool if c["kind"] in _DEFINITION_KINDS]
     if len(defs) == 1:
         return str(defs[0]["id"]), []
-    return None, candidates
+    return None, pool
 
 
 async def resolve_symbol_at(

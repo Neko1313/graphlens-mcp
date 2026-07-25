@@ -24,6 +24,13 @@ _MIN_TERM_LEN = 3
 _MAX_TERMS = 4
 _SAFE_PREFIX = re.compile(r"^[\w./-]*$")
 _DEF_KINDS = ("class", "function", "method")
+# Name matching skips the phantom: an ``external_symbol`` is an unresolved
+# reference with no body and no callers, yet it shares the real symbol's name
+# and used to rank *first* — so a search for ``parseBody`` handed a weak model
+# the phantom's id, and it looped navigating a dead end. ``import`` nodes are
+# deliberately *kept*: they mark the files that use a symbol, which is exactly
+# the signal an impact/enumeration question ("which files construct X") needs.
+_NOISE_KINDS = ["external_symbol"]
 _RG_TIMEOUT_S = 10.0
 
 
@@ -278,10 +285,16 @@ async def _name_hits(
             where = predicate or "toLower(n.name) CONTAINS toLower($q)"
             rows = await graph_store.execute(
                 f"MATCH (n:CodeNode {{project_id: $p}}) WHERE {where} "
+                "AND NOT n.kind IN $noise "
                 "RETURN n.local_id AS id, n.name AS name, n.kind AS kind, "
                 "n.file_path AS file_path LIMIT $lim",
                 # Over-fetch: _in_scope prunes test files after the query.
-                {"p": project_id, "q": term, "lim": limit * 10},
+                {
+                    "p": project_id,
+                    "q": term,
+                    "lim": limit * 10,
+                    "noise": _NOISE_KINDS,
+                },
             )
             for row in rows:
                 node_id = row["id"]

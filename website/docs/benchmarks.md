@@ -32,27 +32,31 @@ Ranges span the strong model ↔ the weaker model (`deepseek-v4-flash` ↔ `glm-
 
 | | SIMPLE accuracy | HARD accuracy | HARD tokens (median) | HARD completion |
 |---|---|---|---|---|
-| **graphlens** | 0.990 – 1.000 | 0.937 – 0.971 | 21.9k – 34.0k | 0.827 – 0.990 |
+| **graphlens** | 1.000 – 1.000 | 0.935 – 0.954 | 21.3k – 44.2k | 0.776 – 1.000 |
 | codegraph | 0.990 – 1.000 | 0.963 – 0.968 | 23.2k – 29.7k | 0.816 – 1.000 |
 | semble | 0.984 – 1.000 | 0.952 – 0.960 | 17.9k – 60.8k | **0.306** – 0.908 |
 | none (control) | 0.600 – 0.639 | 0.665 – 0.702 | 0.3k – 0.8k | — |
 
-On the **strong** model, graphlens leads: SIMPLE 1.000, HARD 0.971 at the lowest median token
-cost of the real arms (21.9k HARD, vs codegraph 23.2k and semble 60.8k). On the **weaker**
-model the picture is a close race between the two graph-based arms — codegraph nudges ahead on
-HARD accuracy (0.968 vs 0.937), graphlens on completion (0.827 vs 0.816) — so the old claim
-that graphlens's lead *widens* on weaker models does not hold here; it's a genuine tie.
+On the **strong** model, graphlens leads: SIMPLE 1.000, HARD 0.954 at **1.000 completion** and
+the lowest median token cost of the real arms (21.3k HARD, vs codegraph 23.2k and semble 60.8k).
+On the **weaker** model the two graph-based arms both clear semble comfortably, but **codegraph
+edges graphlens on HARD** — accuracy 0.968 vs 0.935 *and* completion 0.816 vs 0.776. graphlens's
+weak-model tail is its *impact/enumeration* tasks (e.g. "which files construct `Request(...)`"):
+they spiral in `search` on a model that can't hold a long enumeration, dragging its glm HARD
+median to 44.2k tokens. So the old claim that graphlens's lead *widens* on weaker models does not
+hold — on these two models the two graph arms trade the lead, and codegraph is the steadier one
+under weak-model enumeration.
 
-What does separate the arms on the weaker model is **completion**: `semble`'s HARD completion
+What cleanly separates the arms on the weaker model is **completion**: `semble`'s HARD completion
 collapses to **0.306** — two runs in three never finish, looping on semantic hits the weak
-model can't synthesise into an answer — while both graph-based arms hold near 0.82. The robust,
+model can't synthesise into an answer — while both graph-based arms stay near 0.8. The robust,
 model-independent finding is that *graph-structured context degrades gracefully as the driving
 model weakens; semantic-only search does not*.
 
-Every real arm clears the no-tools control by a wide margin — graphlens's lift is **+0.31–0.40
-HARD**. graphlens's own cost tail is a few *impact/enumeration* tasks (e.g. "which files
-construct `Request(...)`") where the model spirals in `search`; these inflate its *mean* token
-spend but not its median. Upgrading the engine to `graphlens 0.8.2` (which added Rust
+Every real arm clears the no-tools control by a wide margin — graphlens's HARD lift is
+**+0.23–0.29** (mean +0.26). graphlens's weak-model cost tail is a few *impact/enumeration* tasks
+(e.g. "which files construct `Request(...)`") where the model spirals in `search`; these inflate
+its glm HARD token median. Upgrading the engine to `graphlens 0.8.2` (which added Rust
 `implementors`, Go `references`, and TypeScript barrel/type-annotation edges the previous
 version missed) cut those tails sharply — e.g. `hono_impact_getpath` fell from 486k to 111k
 tokens once `getPath`'s callers resolved through the barrel re-export.
@@ -64,8 +68,8 @@ tokens once `getPath`'s callers resolved through the barrel re-export.
 
 | arm | model | accuracy | completion | tokens | cost |
 |---|---|---|---|---|---|
-| graphlens | deepseek-v4-flash | 1.000 | 1.000 | 11,426 | $0.00114 |
-| graphlens | glm-4.7-flash | 0.990 | 1.000 | 16,996 | $0.00112 |
+| graphlens | deepseek-v4-flash | 1.000 | 1.000 | 11,713 | $0.00112 |
+| graphlens | glm-4.7-flash | 1.000 | 1.000 | 16,002 | $0.00108 |
 | codegraph | deepseek-v4-flash | 0.990 | 1.000 | 9,662 | $0.00090 |
 | codegraph | glm-4.7-flash | 1.000 | 0.990 | 10,363 | $0.00074 |
 | semble | deepseek-v4-flash | 1.000 | 0.961 | 12,934 | $0.00121 |
@@ -80,8 +84,8 @@ tokens once `getPath`'s callers resolved through the barrel re-export.
 
 | arm | model | accuracy | completion | tokens | cost |
 |---|---|---|---|---|---|
-| graphlens | deepseek-v4-flash | 0.971 | 0.990 | 23,436 | $0.00218 |
-| graphlens | glm-4.7-flash | 0.937 | 0.827 | 33,952 | $0.00230 |
+| graphlens | deepseek-v4-flash | 0.954 | 1.000 | 21,276 | $0.00207 |
+| graphlens | glm-4.7-flash | 0.935 | 0.776 | 44,249 | $0.00293 |
 | codegraph | deepseek-v4-flash | 0.963 | 1.000 | 23,212 | $0.00214 |
 | codegraph | glm-4.7-flash | 0.968 | 0.816 | 29,674 | $0.00198 |
 | semble | deepseek-v4-flash | 0.952 | 0.908 | 60,804 | $0.00582 |
@@ -113,14 +117,16 @@ runs:
 - a **Wilcoxon signed-rank test** (pairwise): for graphlens vs. each rival specifically, matched
   by `task_id`, with a rank-biserial effect size alongside the p-value.
 
-graphlens and codegraph are statistically a **tie** on HARD accuracy for both models — the
-pairwise Wilcoxon gap is small and not significant in either direction (graphlens edges ahead on
-`deepseek-v4-flash`, codegraph on `glm-4.7-flash`). Where the tests bite is graphlens/codegraph
+graphlens and codegraph are statistically a **tie** on HARD accuracy on the strong model
+(`deepseek-v4-flash`: 0.954 vs 0.963, both at 1.000 completion — the pairwise Wilcoxon gap is
+small and not significant). On the weaker model codegraph is the steadier of the two — ahead on
+both HARD accuracy (0.968 vs 0.935) and completion (0.816 vs 0.776) — though the accuracy gap is
+still modest. Where the tests bite hard is graphlens/codegraph
 vs. `semble` on the weaker model and every arm vs. the `none` control: those gaps are large and
 significant. So the defensible claim from this data is *graph-structured context (graphlens or
 codegraph) beats semantic-only search and beats no tools*, not that graphlens beats codegraph —
-on these two models they trade the lead. Re-run the notebook for the exact p-values and effect
-sizes on your own sweep.
+the two tie on the strong model and codegraph is modestly the steadier on the weaker one. Re-run
+the notebook for the exact p-values and effect sizes on your own sweep.
 
 ## Why `none` (no tools) is in the comparison
 

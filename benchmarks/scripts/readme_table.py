@@ -85,6 +85,33 @@ def main() -> int:
         )
         print(f"| {label} | {s_acc} | {h_acc} | {h_tok} | {h_comp} |")
 
+    # Full breakdown — per arm × model, the exact rows the docs' <details> hold.
+    # accuracy/tokens/cost are over COMPLETED runs (a cut-off run has no answer
+    # to grade); completion is over all runs. Same convention as the headline.
+    df["cost"] = df["cost_exact"].where(
+        df["cost_exact"].notna(), df["cost_table"]
+    )
+    for regime in ("SIMPLE", "HARD"):
+        sub = df[df["regime"] == regime]
+        ok = sub[sub["completed"]]
+        g = ok.groupby(["arm", "model"])
+        acc = g["accuracy"].mean()
+        tok = g["total_tokens"].median()
+        cost = g["cost"].median()
+        comp = sub.groupby(["arm", "model"])["completed"].mean()
+        print(f"\n## {regime} breakdown")
+        print("| arm | model | accuracy | completion | tokens | cost |")
+        print("|---|---|---|---|---|---|")
+        for arm in arms:
+            for model in models:
+                if (arm, model) not in acc.index:
+                    continue
+                print(
+                    f"| {arm} | {model} | {acc[arm, model]:.3f} | "
+                    f"{comp[arm, model]:.3f} | {tok[arm, model]:,.0f} | "
+                    f"${cost[arm, model]:.5f} |"
+                )
+
     # lift over control, per regime — the contamination-robust headline
     print("\n## lift over none-control (mean accuracy)")
     for regime in ("SIMPLE", "HARD"):
