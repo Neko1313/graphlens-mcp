@@ -19,12 +19,36 @@ async def test_bulk_copy_round_trips_nasty_metadata_exactly(graph_store):
     # quotes and (escaped) newlines. A control-char delimiter needs no quoting,
     # so every byte must survive unchanged.
     await persist.ensure_code_schema(graph_store)
-    nasty = '{"span": "Span(a=1, b=2)", "q": "he said \\"hi\\"", "nl": "x\\ny"}'
+    nasty = (
+        '{"span": "Span(a=1, b=2)", "q": "he said \\"hi\\"", "nl": "x\\ny"}'
+    )
     await graph_store.bulk_copy(
         "CodeNode",
         [
-            ("p::a", "p", "a", "function", "a", "a", "f.py", "[1,2]", "{}", "h1"),
-            ("p::b", "p", "b", "function", "b", "b", "f.py", "[3,4]", nasty, "h2"),
+            (
+                "p::a",
+                "p",
+                "a",
+                "function",
+                "a",
+                "a",
+                "f.py",
+                "[1,2]",
+                "{}",
+                "h1",
+            ),
+            (
+                "p::b",
+                "p",
+                "b",
+                "function",
+                "b",
+                "b",
+                "f.py",
+                "[3,4]",
+                nasty,
+                "h2",
+            ),
         ],
     )
     await graph_store.bulk_copy("Rel", [("p::a", "p::b", "calls", nasty)])
@@ -45,11 +69,37 @@ async def test_bulk_copy_appends_without_touching_other_projects(graph_store):
     await persist.ensure_code_schema(graph_store)
     await graph_store.bulk_copy(
         "CodeNode",
-        [("keep::x", "keep", "x", "function", "x", "x", "f.py", "[1]", "{}", "h")],
+        [
+            (
+                "keep::x",
+                "keep",
+                "x",
+                "function",
+                "x",
+                "x",
+                "f.py",
+                "[1]",
+                "{}",
+                "h",
+            )
+        ],
     )
     await graph_store.bulk_copy(
         "CodeNode",
-        [("add::y", "add", "y", "function", "y", "y", "g.py", "[1]", "{}", "h")],
+        [
+            (
+                "add::y",
+                "add",
+                "y",
+                "function",
+                "y",
+                "y",
+                "g.py",
+                "[1]",
+                "{}",
+                "h",
+            )
+        ],
     )
 
     rows = await graph_store.execute(
@@ -69,8 +119,18 @@ async def test_bulk_copy_round_trips_a_multiline_name(graph_store):
     await graph_store.bulk_copy(
         "CodeNode",
         [
-            ("p::u", "p", "u", "import", multiline, "u", "lib.rs", "[1,2]",
-             "{}", "h"),
+            (
+                "p::u",
+                "p",
+                "u",
+                "import",
+                multiline,
+                "u",
+                "lib.rs",
+                "[1,2]",
+                "{}",
+                "h",
+            ),
         ],
     )
     rows = await graph_store.execute(
@@ -90,7 +150,17 @@ async def test_bulk_copy_rejects_a_reserved_format_char(graph_store):
         await graph_store.bulk_copy(
             "CodeNode",
             [
-                ("p::c", "p", "c", "function", "bad\x01name", "c", "f.py",
-                 "[1]", "{}", "h"),
+                (
+                    "p::c",
+                    "p",
+                    "c",
+                    "function",
+                    "bad\x01name",
+                    "c",
+                    "f.py",
+                    "[1]",
+                    "{}",
+                    "h",
+                ),
             ],
         )

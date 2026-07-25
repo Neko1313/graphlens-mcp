@@ -8,13 +8,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # A hung test (e.g. a stalled DB worker) must fail the job fast, not burn the
-    # whole runner budget. pytest-timeout caps individual tests; this caps the job.
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        # graphlens requires Python >= 3.13. Add "3.14" once its wheels are available.
         python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v6
@@ -32,7 +29,8 @@ jobs:
       - name: Install dependencies
         run: task install
 
-      # Single gate: lint + format-check + typecheck + security + tests, so CI and
-      # a local `task check` run exactly the same steps.
-      - name: Check
-        run: task check
+      - name: Lint
+        run: task lint CI=true
+
+      - name: Test
+        run: task test

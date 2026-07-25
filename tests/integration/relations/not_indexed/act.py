@@ -26,7 +26,10 @@ async def _seed(graph_store) -> None:
     await graph_store.execute(
         "MATCH (a:CodeNode {id: $a}), (b:CodeNode {id: $b}) "
         "CREATE (a)-[:Rel {kind: 'calls', metadata: ''}]->(b)",
-        {"a": persist.gid(PROJECT, "caller"), "b": persist.gid(PROJECT, "callee")},
+        {
+            "a": persist.gid(PROJECT, "caller"),
+            "b": persist.gid(PROJECT, "callee"),
+        },
     )
 
 
@@ -60,7 +63,10 @@ async def test_a_group_with_edges_is_not_called_unknown(graph_store):
     await graph_store.execute(
         "MATCH (a:CodeNode {id: $a}), (b:CodeNode {id: $b}) "
         "CREATE (a)-[:Rel {kind: 'references', metadata: ''}]->(b)",
-        {"a": persist.gid(PROJECT, "caller"), "b": persist.gid(PROJECT, "callee")},
+        {
+            "a": persist.gid(PROJECT, "caller"),
+            "b": persist.gid(PROJECT, "callee"),
+        },
     )
 
     result = await relations_service.get_relations(

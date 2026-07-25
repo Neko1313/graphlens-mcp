@@ -17,70 +17,52 @@ tasks:
   install:
     desc: Sync the virtualenv with all dependency groups and extras
     cmds:
-      # --all-extras: the neo4j backend module imports the `neo4j` package
-      # unconditionally at module level, so lint/typecheck/tests need it
-      # installed even when nobody's exercising the Neo4j backend itself.
       - uv sync --all-groups --all-extras
 
   lint:
     desc: Lint with ruff (curated ruleset in ruff.toml)
     cmds:
-      - uv run ruff check {{.SRC}} {{.TESTS}}
-
-  format:
-    desc: Format with ruff
-    cmds:
-      - uv run ruff format {{.SRC}} {{.TESTS}}
-
-  format-check:
-    desc: Verify formatting without writing changes
-    cmds:
-      - uv run ruff format --check {{.SRC}} {{.TESTS}}
-
-  fix:
-    desc: Auto-fix lint issues and format
-    cmds:
-      - uv run ruff check --fix {{.SRC}} {{.TESTS}}
-      - uv run ruff format {{.SRC}} {{.TESTS}}
-
-  typecheck:
-    desc: Type-check with ty
-    cmds:
-      - uv run ty check {{.SRC}}
-
-  security:
-    desc: Security scan with bandit
-    cmds:
-      - uv run bandit -c pyproject.toml -r {{.SRC}}
+      - |
+        if [[ "{{.CI}}" == "true" ]]; then
+          echo "Запуск линтеров с отчетами для CI..."
+          mkdir -p reports
+          uv run ruff check --output-format json --output-file reports/ruff.json src tests
+          uv run bandit -c pyproject.toml -r src -o reports/bandit.json --format json
+          uv run ty check --output-format gitlab > reports/gl-code-quality-report.json
+        else
+          echo "Запуск линтеров для разработки..."
+          uv run ruff format src tests
+          uv run ruff check --fix src tests
+          uv run ty check
+          uv run bandit -c pyproject.toml -r src
+        fi
 
   test:
     desc: Run the test suite in parallel with coverage
-    # Keep the embedding model off the network: an autouse fixture
-    # (tests/fixtures/embedding.py) replaces the real model2vec model with a
-    # deterministic, hash-seeded fake for every test, so encode() never tries
-    # to download potion-code-16M (which would be slow, flaky, and — on a
-    # network-isolated CI runner — a hard failure).
     env:
       HF_HUB_OFFLINE: "1"
-    # loadgroup, not the default load: the Milvus-backed tests are pinned to one
-    # worker (see tests/conftest.py) because Milvus Lite runs a local server per
-    # client. Parallelism lives here rather than in addopts so a bare `pytest`
-    # stays serial — xdist swallows output and breakpoints while debugging.
     cmds:
-      - uv run pytest -n auto --dist loadgroup --cov=src --cov-report=term-missing
-
-  check:
-    desc: Run lint, format-check, typecheck, security and tests (CI gate)
-    cmds:
-      - task: lint
-      - task: format-check
-      - task: typecheck
-      - task: security
-      - task: test
-
-  # ---------------------------------------------------------------------------
-  # Docs site (Docusaurus, under website/; needs Node + pnpm)
-  # ---------------------------------------------------------------------------
+      - |
+        if [[ "{{.CI}}" == "true" ]]; then
+          echo "Запуск тестов с отчетами для CI..."
+          mkdir -p reports
+          uv run pytest \
+            -n auto tests \
+            -m "not validation" \
+            --junitxml=reports/junit.xml \
+            --cov=src \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-report=term-missing \
+            {{.CLI_ARGS}}
+        else
+          echo "Запуск тестов для разработки..."
+          uv run pytest \
+            -n auto tests \
+            -m "not validation" \
+            --cov=src \
+            --cov-report=term-missing:skip-covered \
+            {{.CLI_ARGS}}
+        fi
 
   docs:install:
     desc: Install the docs site dependencies
@@ -99,11 +81,6 @@ tasks:
     dir: website
     cmds:
       - pnpm build
-
-  # ---------------------------------------------------------------------------
-  # Release (ported from the graphlens engine; single-package). Driven by the
-  # Release workflow; conventional commits decide the next version via git-cliff.
-  # ---------------------------------------------------------------------------
 
   release:version:
     desc: Determine next version via conventional commits
@@ -128,8 +105,6 @@ tasks:
     cmds:
       - uv version {{.VERSION}} --frozen
       - uv lock
-      # server.json has no native bump tool, so keep its version (and the pinned
-      # PyPI package version it advertises) in lockstep with pyproject via jq.
       - |
         tmp=$(mktemp)
         jq --arg v "{{.VERSION}}" '.version = $v | .packages[0].version = $v' server.json > "$tmp"

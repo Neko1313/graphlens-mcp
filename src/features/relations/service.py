@@ -168,9 +168,7 @@ async def _not_indexed(
     )
     present = {row["kind"] for row in rows}
     return [
-        group
-        for kind, group in _GROUP_OF_KIND.items()
-        if kind not in present
+        group for kind, group in _GROUP_OF_KIND.items() if kind not in present
     ]
 
 
