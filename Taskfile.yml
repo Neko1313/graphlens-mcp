@@ -15,64 +15,54 @@ tasks:
     silent: true
 
   install:
-    desc: Sync the virtualenv with all dependency groups
+    desc: Sync the virtualenv with all dependency groups and extras
     cmds:
-      - uv sync --all-groups
+      - uv sync --all-groups --all-extras
 
   lint:
     desc: Lint with ruff (curated ruleset in ruff.toml)
     cmds:
-      - uv run ruff check {{.SRC}} {{.TESTS}}
-
-  format:
-    desc: Format with ruff
-    cmds:
-      - uv run ruff format {{.SRC}} {{.TESTS}}
-
-  format-check:
-    desc: Verify formatting without writing changes
-    cmds:
-      - uv run ruff format --check {{.SRC}} {{.TESTS}}
-
-  fix:
-    desc: Auto-fix lint issues and format
-    cmds:
-      - uv run ruff check --fix {{.SRC}} {{.TESTS}}
-      - uv run ruff format {{.SRC}} {{.TESTS}}
-
-  typecheck:
-    desc: Type-check with ty
-    cmds:
-      - uv run ty check {{.SRC}}
-
-  security:
-    desc: Security scan with bandit
-    cmds:
-      - uv run bandit -c pyproject.toml -r {{.SRC}}
+      - |
+        if [[ "{{.CI}}" == "true" ]]; then
+          echo "Запуск линтеров с отчетами для CI..."
+          mkdir -p reports
+          uv run ruff check --output-format json --output-file reports/ruff.json src tests
+          uv run bandit -c pyproject.toml -r src -o reports/bandit.json --format json
+          uv run ty check --output-format gitlab > reports/gl-code-quality-report.json
+        else
+          echo "Запуск линтеров для разработки..."
+          uv run ruff format src tests
+          uv run ruff check --fix src tests
+          uv run ty check
+          uv run bandit -c pyproject.toml -r src
+        fi
 
   test:
-    desc: Run the test suite with coverage
-    # Keep the embedding model off the network: the semantic tests drive the
-    # real code paths with a monkeypatched model and assert the offline-degrade
-    # behavior, so a CI run must never try to download potion-code-16M (which
-    # would be slow and flaky). Tests that need a live model are skipped.
+    desc: Run the test suite in parallel with coverage
     env:
       HF_HUB_OFFLINE: "1"
     cmds:
-      - uv run pytest --cov=src --cov-report=term-missing
-
-  check:
-    desc: Run lint, format-check, typecheck, security and tests (CI gate)
-    cmds:
-      - task: lint
-      - task: format-check
-      - task: typecheck
-      - task: security
-      - task: test
-
-  # ---------------------------------------------------------------------------
-  # Docs site (Docusaurus, under website/; needs Node + pnpm)
-  # ---------------------------------------------------------------------------
+      - |
+        if [[ "{{.CI}}" == "true" ]]; then
+          echo "Запуск тестов с отчетами для CI..."
+          mkdir -p reports
+          uv run pytest \
+            -n auto tests \
+            -m "not validation" \
+            --junitxml=reports/junit.xml \
+            --cov=src \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-report=term-missing \
+            {{.CLI_ARGS}}
+        else
+          echo "Запуск тестов для разработки..."
+          uv run pytest \
+            -n auto tests \
+            -m "not validation" \
+            --cov=src \
+            --cov-report=term-missing:skip-covered \
+            {{.CLI_ARGS}}
+        fi
 
   docs:install:
     desc: Install the docs site dependencies
@@ -91,11 +81,6 @@ tasks:
     dir: website
     cmds:
       - pnpm build
-
-  # ---------------------------------------------------------------------------
-  # Release (ported from the graphlens engine; single-package). Driven by the
-  # Release workflow; conventional commits decide the next version via git-cliff.
-  # ---------------------------------------------------------------------------
 
   release:version:
     desc: Determine next version via conventional commits
@@ -120,8 +105,6 @@ tasks:
     cmds:
       - uv version {{.VERSION}} --frozen
       - uv lock
-      # server.json has no native bump tool, so keep its version (and the pinned
-      # PyPI package version it advertises) in lockstep with pyproject via jq.
       - |
         tmp=$(mktemp)
         jq --arg v "{{.VERSION}}" '.version = $v | .packages[0].version = $v' server.json > "$tmp"

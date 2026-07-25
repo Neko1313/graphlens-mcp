@@ -6,69 +6,81 @@ sidebar_position: 4
 
 # Agent tools
 
-graphlens exposes exactly **three** MCP tools. Everything returned is a graph node — from a
-real parse, not a text match — so an agent can trust a result instead of re-verifying it with
-grep.
+graphlens exposes **six** MCP tools. Three are for navigation — `search`, `info`,
+`relations` — and three manage projects — `index`, `list_projects`, `remove_project`.
+Navigation results come from a real parse, not a text match, so an agent can trust a result
+instead of re-verifying it with grep. All tools take **flat** parameters (not a nested
+`params` object).
 
-Every response carries `resolver_status` (`ok` | `degraded`, aggregated across every returned
-node's file) and an `indexing` boolean. The server starts serving immediately and reconciles the
-graph in the background, so `indexing=true` means a reindex is running and edges may still be
-incomplete — don't conclude a symbol is unused while `indexing=true`. List-shaped results also
-carry a `truncated` flag, and relation lists include a matching `*_total` field so a hidden tail
-shows up as a number instead of a silent drop.
+## Navigation
 
 | Tool | Purpose |
 |---|---|
-| `search(query, limit=25, path_glob=None, exhaustive=False)` | Find code by NAME, CONTENT, or MEANING in one call — the entry point. Content is matched literally (not regex). Test files are excluded by default. `exhaustive=true` lists every matching file path for "list EVERY file that calls X" tasks. |
-| `relations(symbol, depth=2, limit=25, file=None)` | A symbol's callers, callees, implementors, and non-call references in one call — the impact-analysis tool and the answer to "what implements/extends X?" |
-| `info(target, limit=200, file=None, mode="outline", offset=1)` | Read a symbol's source/signature, or a file's outline (default) or actual line-numbered content (`mode="source"`, Read-equivalent, with `offset`/`limit` windowing and a `dependents` list). |
+| `search(query, project=None, limit=25, path_glob=None, verbosity="concise", exhaustive=False)` | Find code by NAME, CONTENT, or MEANING in one call — the entry point. Name matching runs first, then semantic. `concise` (default) returns one line per hit — `name · kind signature · path:line · id=…`, usually already the answer; `detailed` also inlines each hit's source. Content is literal (not regex). Test files are excluded by default. `exhaustive=true` lists every in-scope **file path** instead of ranked hits. |
+| `relations(symbol, project=None, depth=1, limit=25, kinds="", file="", ref="", at="")` | A symbol's callers, callees, implementors, and references in one call — the impact-analysis tool. Default `depth=1` is the **direct** callers/callees; raise it only to trace transitively. Each group carries a `*_total`; `callees_unresolved` counts calls graphlens couldn't bind; `not_indexed` names groups this project's language analyzer never produces. |
+| `info(target, project=None, mode="outline", limit=None, offset=0, file="", ref="", at="")` | Read a symbol's source + signature + metadata, or a file's `outline` of symbols (default) or full `source` (`mode="source"`, line-numbered with `offset`/`limit` windowing and an importers list). |
 
-`relations` and `info` both accept a node ID **or** a bare symbol name — the name is resolved
+`relations` and `info` both accept a node id **or** a bare symbol name — the name is resolved
 internally, so no prior `search` call is required. If a name matches several definitions, pass
 `file` (a path or suffix) to pin the one you mean.
 
+`project` is optional: omit it when only one project is indexed and the server resolves it.
+When several are indexed, pass the id, the name, or an unambiguous id-prefix — never call
+`list_projects` just to learn it.
+
+## Project management
+
+| Tool | Purpose |
+|---|---|
+| `index(directory=…` **or** `repo_url=…, ref=…, ci_token=…, name=…, description=…)` | Add a project to the graph — pass exactly one source. Re-running it refreshes in place (see [Freshness](./freshness.md)). Returns counts plus `resolver_status` per language. |
+| `list_projects()` | List every indexed project (id, name, path, git url, description). |
+| `remove_project(project=…)` | Delete a project's graph nodes, embeddings, and registry entry. |
+
 ## Searching effectively
 
-`search` unifies three matching strategies — exact/near name match, literal content match, and
-semantic (meaning) fallback — over the same node graph:
+`search` blends name/content/semantic matching over the same node graph:
 
 - **Don't search a bare common noun** (`Location`, `User`, `Config`) expecting the defining
   class to rank first among files, imports, and short names sharing the token.
 - **Use the most distinctive identifier** you have: a compound name (`LocationRepository`) or
   qualify with the module path (`models.Location`).
-- **Know the file? Skip search.** `info(path)` deterministically lists every node's outline.
+- **Know the file? Skip search.** `info("path/to/file.py")` lists that file's outline.
 - Content queries are **literal, not regex** — write `Request(` or `getErrorMap(` as-is.
-- Scope with `path_glob` (e.g. `"tests/*"`, `"*.ts"`, `"!tests/*"`) instead of guessing a
-  `file:`/`content:` query syntax that doesn't exist.
+- Scope with `path_glob`, a literal pathlib glob (`src/**/*.py`) — `*` does not cross `/`, so
+  nested files need `**`. There is no `!`-negation. Test files are already excluded by
+  default; a glob that *names* tests (`**/*_test.go`) opts them back in.
 
-The semantic fallback embeds graph nodes with a bundled `model2vec` model (no extra install). If
-the embedding model can't be fetched (offline first run), semantic matching is skipped and
-`search` falls back to name/content matching only.
+The semantic pass embeds nodes with a small `model2vec` model that is fetched on first use and
+cached; if it can't be fetched (offline first run) the `search` call errors rather than
+silently degrading.
 
 ## Impact-analysis workflow
 
-When asked *"what breaks if I change X?"*:
+When asked *"what breaks if I change X?"* or *"which files call X?"*:
 
-1. `relations("X", depth=3)` → callers, callees, implementors, and references in one call. Pass
-   the name directly — a prior `search("X")` lookup is optional.
-2. If a list's `*_total` exceeds what's shown, narrow with `search` and distinguishing terms
-   rather than re-calling `relations` with a bigger `limit` — the cap reflects the graph's real
-   size, not a page boundary.
-3. Summarise the affected symbols — use `info` only for the ones that need elaboration, instead
-   of reading every caller file.
+1. `relations("X")` → the `callers` group **is** the answer; the files those callers live in
+   are the impact set. Pass the name directly — a prior `search("X")` is optional.
+2. Size it by `callers_total` first; keep the default `depth=1` (a higher depth adds indirect
+   callers and answers a different question). Do **not** pad the set with `search` hits —
+   search also matches imports, mentions, and the definition, which are not calls.
+3. Summarise the affected symbols — use `info` only where a caller needs elaboration.
 
-## Respect `resolver_status` and `indexing`
+State the completeness caveat where it matters: dynamic dispatch, DI, reflection,
+cross-language, and un-indexed code can hide callers. Read `not_indexed` (a listed group is
+*unknown*, not empty) and non-zero `callees_unresolved` as "may be incomplete", not "none".
 
-- `resolver_status: "ok"` — full semantic graph, edges are trustworthy.
-- `resolver_status: "degraded"` — calls/types not fully resolved (usually a missing language
-  toolchain); treat edges as approximate and suggest `graphlens-mcp reindex` or installing the
-  toolchain.
-- `indexing: true` — a background reindex is still running, so missing callers/edges may simply
-  not be indexed yet — don't conclude a symbol is unused until indexing has settled.
+## History (time-travel)
 
-## Repeat guard
+`info` and `relations` accept `ref` and `at` to answer from an indexed past commit instead of
+now: `at` is a commit sha (a short prefix is fine) or a seq from the project's history. A past
+revision returns a symbol's recorded metadata and its neighbours of the day, but **not** its
+source body; `search` is always current. Use it for "when did this call disappear", "who
+called X before the refactor", "did this symbol exist at release-1.2".
 
-Calling `search`, `relations`, or `info` with identical arguments twice returns a `repeat_hint` —
-the result is deterministic and won't change. A third identical call is blocked outright
-(`error` field set, no data) to force a different query, tool, or a final answer instead of
-looping.
+## Coverage signals
+
+- `resolver_status` (on the `index` result) — `ok` per language, or `degraded` when a
+  language server is missing (`gopls` for Go, `rust-analyzer` for Rust). Degraded means fewer
+  resolved cross-file edges; re-run `index` after installing the toolchain.
+- `not_indexed` / `*_unresolved` (on `relations`) — the honest "unknown, not none" signals
+  described above.

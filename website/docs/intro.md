@@ -19,29 +19,31 @@ The motivation is the same as every other code-context tool: **stop the agent fr
 The *approach* is what sets `graphlens` apart. Most tools build their **own** ad-hoc model of
 your code — every tool maps the codebase a little differently and nothing is authoritative.
 `graphlens` instead builds on the **language's own real analysis engines** (`rust-analyzer`,
-`gopls`, the TypeScript compiler, the bundled `ty` type engine) — the LSP-grade tooling the
-industry already trusts — for a *stable, real* picture of the project, not a bespoke
-approximation.
+`gopls`, the TypeScript compiler, Python analysis) — the LSP-grade tooling the industry
+already trusts — for a *stable, real* picture of the project, not a bespoke approximation.
 
 That stable foundation is the [`graphlens`](https://github.com/Neko1313/graphlens) engine
 (parsing, stable node identity, resolvers). **`graphlens-mcp` is a smart, agent-facing layer
-over it**: it persists the graph (so the whole thing isn't held in memory), adds a semantic +
-clustering layer, keeps it fresh as you edit through a filesystem watcher, and exposes it to
-agents as navigation tools plus a bundled skill. From that example it is growing into a
-self-sufficient system — see [Architecture](./architecture.md) for how the layer is built.
+over it**: it persists the graph (so the whole thing isn't held in memory), adds a semantic
+embedding layer for meaning-based search, refreshes incrementally when you re-run the `index`
+tool, and exposes it to agents as navigation tools plus slash-prompt workflows. See
+[Architecture](./architecture.md) for how the layer is built.
 
 ## Supported languages
 
-| Language | Engine | Out-of-box |
-|---|---|---|
-| Python | `ty` (bundled) | Full semantics immediately |
-| TypeScript | Node bridge | `degraded` without Node; full semantics with Node installed |
-| Go | Go toolchain | `degraded` without toolchain |
-| Rust | SCIP / rust-analyzer | `degraded` without toolchain |
-| PHP | PHP parser | `degraded` without toolchain |
+Language support ships in the engine extra `graphlens[go,python,rust,typescript,php]`:
 
-`graphlens-mcp status` reports the actual resolver status per language. When a toolchain is
-missing, that language is reported as **degraded** (parsed structure, calls/types not fully
-resolved) with an install hint — it never blocks `init`.
+| Language | Full resolution needs | Out-of-box |
+|---|---|---|
+| Python | — | Full semantics immediately |
+| TypeScript | Node.js | `degraded` without Node; full with Node installed |
+| Go | `gopls` on `PATH` | `degraded` without it |
+| Rust | `rust-analyzer` on `PATH` | `degraded` without it |
+| PHP | — | Parsed structure |
+
+The `index` tool's result reports the actual `resolver_status` per language. When a language
+server is missing, that language is indexed in **degraded** mode (parsed structure, calls/types
+not fully resolved) — it never blocks indexing; install the toolchain and re-run `index` for
+full coverage.
 
 Ready to try it? Head to [Getting started](./getting-started.md).

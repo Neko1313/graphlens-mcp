@@ -6,8 +6,10 @@ sidebar_position: 5
 
 # Navigating the graph
 
-The bundled **navigation skill** teaches the agent to answer structural questions with graph
-tools instead of reading files or grepping. The core strategy:
+The server ships **navigation prompts** — slash-workflows `impact`, `find`, `trace`, `map`,
+`xflow`, `deadcode` — that turn a request into a fixed method over the graph tools, so the
+agent answers structural questions with `search` / `relations` / `info` instead of reading
+files or grepping. The core strategy:
 
 1. **Know the name? Skip straight to `relations`/`info`.** Both accept a bare symbol name or a
    node ID — resolved internally, no prior `search` call needed.
@@ -34,7 +36,8 @@ tools instead of reading files or grepping. The core strategy:
 | What symbols are in `order_service.py`? | `info("order_service.py")` (outline) |
 | Show source + signature of a symbol | `info(id)` |
 | Read a file's actual content (to edit it) | `info(path, mode="source")` |
-| List every file that calls/imports `X` | `search("X", exhaustive=True)` |
+| List every file that calls `X` | `relations("X")` → `callers` |
+| List every indexed file (optionally `path_glob`-scoped) | `search(exhaustive=True)` |
 | Find text in bodies/strings/config (the grep case) | `search("literal text")` |
 | Find code by meaning when you don't know the name | `search("retry with backoff")` |
 
@@ -45,9 +48,10 @@ tools instead of reading files or grepping. The core strategy:
   a distinctive/qualified name, or `info(path)` when you know the file.
 - Shell out to `grep`/`rg`/`find` — `search` is the content-search replacement and keeps you on
   the graph (each hit maps back to nodes).
-- Assume a list is complete when `resolver_status != "ok"`.
-- Conclude a symbol is unused when the response has `indexing: true` — that flag means a
-  background reindex is still running, so edges may be incomplete. Re-check once indexing
-  settles.
-- Repeat the exact same `search`/`relations`/`info` call expecting a different result — the
-  third identical call is blocked outright; change the query, tool, or answer with what you have.
+- Read a `relations` group named in `not_indexed` as "none" — it means the language analyzer
+  never produces that group (Rust has no implementors, Go no references), so it is *unknown*.
+- Conclude a symbol is unused without stating the caveat: dynamic dispatch, DI, reflection,
+  cross-language, and un-indexed code can hide callers; a non-zero `callees_unresolved` is
+  another "may be incomplete" signal.
+- Repeat the exact same `search`/`relations`/`info` call expecting a different result — it is
+  deterministic and won't change; change the query, switch tool, or answer with what you have.

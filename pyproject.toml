@@ -9,36 +9,63 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "aiosqlite>=0.22.1",
-    "click>=8.4.2",
-    "fastmcp>=3.4.2",
-    "graphlens[go,python,rust,typescript,php]>=0.7.0",
-    "model2vec>=0.4",
-    "questionary>=2.0.1",
-    "tomlkit>=0.15.0",
-    "watchfiles>=0.24",
+    "graphlens[go,python,rust,typescript,php]~=0.8.2",
+    "kuzu~=0.11.3",
+    "mcp[cli]==2.0.0b1",
+    "model2vec~=0.8.2",
+    "platformdirs>=4.10.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "pymilvus[milvus-lite]>=2.6.17,<3",
+    "milvus-lite~=2.4.12",
+    # milvus-lite 2.4.x imports pkg_resources at load time but only declares tqdm.
+    # setuptools>=81 dropped pkg_resources, so cap below that to keep it available.
+    "setuptools<81",
 ]
 
+# Server-tier graph backend (k8s deployments), selected via GRAPHLENS_GRAPH_BACKEND=neo4j.
+# Local/embedded default is kuzu (core dependency above).
+[project.optional-dependencies]
+neo4j = ["neo4j~=6.2.0"]
+
 [project.scripts]
-graphlens-mcp = "graphlens_mcp.cli:main"
+graphlens-mcp = "app.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.3,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.uv]
+# The MCP SDK is pinned to a beta — `mcp[cli]==2.0.0b1` — whose transitive
+# `mcp-types==2.0.0b1` is also a pre-release. A fresh resolution (e.g.
+# `uv tool install ./`) rejects pre-releases by default, so allow them here.
+# Remove this once `mcp` 2.x ships a stable release and the pin is bumped.
+prerelease = "allow"
+
+# The refactor moved off a single src/graphlens_mcp/ package onto a feature-sliced
+# layout with multiple top-level packages (app/entities/features/shared) directly
+# under src/ — tell uv_build about all of them explicitly.
+[tool.uv.build-backend]
+module-name = ["app", "entities", "features", "shared"]
+module-root = "src"
+
 [dependency-groups]
 # Mirrors the graphlens engine: a lint group and a test group, synced together via
 # `uv sync --all-groups`. Ruff/ty config lives in ruff.toml / ty.toml (engine parity).
 lint = [
-    "bandit>=1.9.3",
-    "ruff>=0.15.0",
-    "ty>=0.0.15",
+    "bandit~=1.9.4",
+    "ruff~=0.15.20",
+    "ty~=0.0.26",
 ]
 test = [
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "pytest-cov>=5.0",
-    "pytest-timeout>=2.3",
+    "polyfactory~=3.3.0",
+    "pytest~=9.1.1",
+    "pytest-asyncio~=1.4.0",
+    "pytest-cov~=7.1.0",
+    "pytest-randomly~=4.1.0",
+    "pytest-timeout~=2.3",
+    "pytest-xdist[psutil]~=3.8.0",
+    "testcontainers~=4.0",
 ]
 
 # ----------------------------------------------------------------------
@@ -50,22 +77,41 @@ exclude_dirs = ["tests"]
 # B608: the only f-string SQL builds an IN(...) from a count of '?' placeholders or a
 # fixed table allowlist — never user data. Ruff's S608 (enabled via ALL) is the active
 # per-site guard that will flag any genuinely unsafe new query.
-skips = ["B608"]
+# B404/B603: every subprocess call in src is git/ripgrep invoked as an argv list, never
+# shell=True, with untrusted input placed after an explicit `--`; ruff's S603 (already
+# ignored project-wide in ruff.toml) is the equivalent check for new call sites, so
+# bandit flagging the same reviewed-safe pattern on every existing one is just noise.
+skips = ["B608", "B404", "B603"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The layout names test files by scenario (act.py = happy paths, error.py =
+# errors/edges, plus descriptive files for complex cases) rather than test_*.py,
+# so widen collection to match them. Fixtures under tests/fixtures/** don't match
+# and are loaded via the pytest_plugins chain, not collected as tests.
+python_files = ["act.py", "error.py", "test_*.py", "*_test.py"]
+# importlib mode lets sibling act.py/error.py files coexist without __init__.py in
+# every test dir; pythonpath puts the repo root on sys.path so the tests.fixtures
+# plugin chain (registered in tests/conftest.py) imports.
+pythonpath = ["."]
 # A per-test ceiling so a single hang (e.g. a stalled DB worker) fails fast with a
 # traceback instead of stalling the whole run; integration analyze stays well under it.
-addopts = "-q --strict-markers --timeout=120"
+addopts = "-q --strict-markers --timeout=120 --import-mode=importlib"
 markers = [
-    "unit: pure tests, no external processes",
-    "integration: real graphlens analyze / filesystem / CLI",
-    "store: SqliteStore behavior",
-    "workspace: indexing & freshness",
-    "agents: agent registry (de)registration",
-    "cli: command-line interface",
-    "tools: MCP tool layer",
-    "golden: batch == incremental invariant",
-    "paths: path normalization",
+    # scope — exactly one per test
+    "unit: pure tests, no external processes or stores",
+    "integration: real embedded stores (Kuzu / Milvus Lite) or graphlens analyze",
+    # business entity / process — at least one per test
+    "project: project identity & management (index/refresh/remove/list)",
+    "indexing: the graphlens indexing pipeline",
+    "search: the search feature",
+    "relations: the relations feature",
+    "info: the info feature",
+    "registry: the project registry store",
+    "isolation: cross-project isolation invariants",
+    "temporal: append-only version log & state_at time-travel",
+    "tools: MCP tool adapter layer",
+    "golden: batch == incremental indexing invariant",
+    "neo4j: cross-engine parity against a real Neo4j (needs Docker)",
 ]

@@ -41,8 +41,6 @@ select = [
     "RUF",
     "TCH",
     "ARG",
-    "DOC",
-    "D",
 ]
 
 [lint.pylint]

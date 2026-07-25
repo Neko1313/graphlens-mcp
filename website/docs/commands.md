@@ -1,73 +1,57 @@
 ---
 id: commands
-title: CLI commands
+title: CLI & invocation
 sidebar_position: 3
 ---
 
-# CLI commands
+# CLI & invocation
 
-| Command | What it does |
+`graphlens-mcp` is an MCP **server**, not a task runner — its command line only chooses a
+transport. Everything else (indexing a project, searching, navigating, removing a project)
+is done through [MCP tools](./agent-tools.md) that the agent calls over that transport, not
+through subcommands.
+
+| Invocation | What it does |
 |---|---|
-| `graphlens-mcp init` | Detect languages → toolchain doctor → full index → configure agents → install skill |
-| `graphlens-mcp serve` | Start the MCP server over stdio. **Launched by the agent**, not by you |
-| `graphlens-mcp status` | Show detected languages, toolchain status, and graph size/freshness |
-| `graphlens-mcp reindex` | Force a full rebuild (e.g. after installing a new toolchain) |
-| `graphlens-mcp remove` | Deregister from agents and (with `--purge-db`) delete the local graph |
+| `graphlens-mcp` | Serve over **stdio**. The common local case — your agent spawns the process and talks to it over the pipe. |
+| `graphlens-mcp --http` | Serve over **Streamable HTTP** for a standalone or Kubernetes deployment. |
 
-Add the global `--verbose` / `-v` flag before any command for more detailed output, e.g.
-`graphlens-mcp -v status`.
+There are no `init` / `serve` / `status` / `reindex` / `remove` subcommands — those actions
+live in the MCP tool surface.
 
-## `init`
+## Flags
 
 ```bash
-graphlens-mcp init [--root DIR] [--db PATH] \
-  [--agent NAME ...] [--no-agent] [--no-skills] [--yes]
+graphlens-mcp --http [--host 127.0.0.1] [--port 8000]
 ```
 
-- `--root` — project root (default: current directory).
-- `--db` — graph database path (default: `<root>/.graphlens/graph.db`).
-- `--agent` — agent to configure, repeatable; skips the interactive selector.
-- `--no-agent` / `--no-skills` — index only / skip the navigation skill install.
-- `--yes` — accept detected agents without prompting (CI-friendly).
+- `--http` — serve Streamable HTTP instead of stdio.
+- `--host` — bind host for `--http` (default `127.0.0.1`).
+- `--port` — bind port for `--http` (default `8000`).
 
-## `serve`
+That is the entire command-line surface (`app.cli:main`).
 
-```bash
-graphlens-mcp serve [--root DIR] [--db PATH] [--watch/--no-watch]
-```
+## Managing a project
 
-The agent launches this from its MCP config. The server answers queries from SQLite and, by
-default, starts a **filesystem watcher** that keeps the graph fresh as you edit. Pass
-`--no-watch` to disable it (the on-access freshness check still applies). See
-[Freshness](./freshness.md).
+Adding, refreshing, and removing projects are **tool calls the agent makes**, not CLI
+commands:
 
-## `status`
+| Task | MCP tool |
+|---|---|
+| Add / refresh a project | `index(directory=…)` locally, or `index(repo_url=…)` for a server-side clone. Re-running it refreshes in place (diff-driven — there is no separate reindex). |
+| List indexed projects | `list_projects()` |
+| Drop a project's index | `remove_project(project=…)` |
 
-```bash
-graphlens-mcp status [--root DIR] [--db PATH] [--json]
-```
+A project is always a **whole git repository** — its identity is a hash of the git remote, so
+a local checkout and a CI clone of the same repo map to the same project. See
+[Agent tools](./agent-tools.md) for the full signatures and [Freshness](./freshness.md) for
+how re-indexing works.
 
-Reports index freshness and stats for a project — detected languages, toolchain status, and
-graph size/age — so you can tell whether the graph is up to date.
+## Where data lives
 
-- `--root` — project root (default: current directory).
-- `--db` — graph database path (default: `<root>/.graphlens/graph.db`).
-- `--json` — emit the report as JSON instead of human-readable text.
-
-## `reindex`
-
-```bash
-graphlens-mcp reindex [--root DIR] [--db PATH]
-```
-
-Clears and rebuilds the whole graph. Use it after installing a new language toolchain, or for
-an exact cross-language / whole-project re-link.
-
-## `remove`
-
-```bash
-graphlens-mcp remove [--root DIR] [--agent NAME ...] [--purge-db] [--yes]
-```
-
-Removes the `graphlens` entry from each agent's config (leaving your other servers intact).
-With `--purge-db` it also deletes the `.graphlens/` cache.
+In local mode (no database DSN configured) the graph and embeddings are written to your OS
+user-data directory — on Linux, `$XDG_DATA_HOME/graphlens-mcp/` — as `graph.db` (embedded
+Kuzu), `vector.db` (Milvus Lite), and `registry.db` (the project registry). It is a
+regenerable cache; deleting it and re-indexing rebuilds it. For a hosted deployment set
+`DB__GRAPH` (a `neo4j://` DSN) and `DB__VECTOR` to point at host Neo4j + Milvus behind the
+same ports — see [Architecture](./architecture.md).

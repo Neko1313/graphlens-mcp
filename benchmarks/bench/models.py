@@ -1,12 +1,13 @@
 """
 OpenRouter model registry + pricing.
 
-Three models span a wide capability/price band so we can see how robustly each
-MCP server's tool surface holds up as the driving model gets weaker:
-
-  - deepseek-chat-v3 : strong, cheap open MoE
-  - gemini-2.5-flash : fast hosted mid-tier
-  - qwen3-8b         : small open model — the stress test for tool-calling
+The headline model is `deepseek-v4-flash` — a strong, cheap open MoE. Other
+flash-tier options (`qwen3.5-flash`, `glm-4.7-flash`, the nemotron models) stay
+in the registry for a wider sweep. Two weak models that once filled the "does
+the tool surface hold up on a weak model" slot — `gemma-4-26b` and
+`gpt-oss-20b` — were removed: gpt-oss-20b was verified to fail at synthesising
+answers from tool results (a model limitation, not a tool-surface one), so it
+produced noise rather than a clean arm signal.
 
 Cost is captured two ways and the run records both:
   1. **exact** — OpenRouter usage accounting returns the real charged cost per
@@ -29,16 +30,17 @@ import httpx
 # control). All verified to support function/tool calling on OpenRouter.
 MODELS: dict[str, str] = {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
-    "gemma-4-26b": "google/gemma-4-26b-a4b-it",
     "qwen3.5-flash": "qwen/qwen3.5-flash-02-23",
     "glm-4.7-flash": "z-ai/glm-4.7-flash",
-    # Real (paid) — added for a 3-model comparison; the identical :free id
-    # rate-limited too hard for a full sweep (see nemotron-super-120b-free).
+    # Real (paid) — the identical :free id rate-limited too hard for a full
+    # sweep (see nemotron-super-120b-free).
     "nemotron-super-120b": "nvidia/nemotron-3-super-120b-a12b",
-    # Replaces nemotron-super-120b as the weak-model slot: nemotron's OpenRouter
-    # endpoint returned malformed responses (~35% of calls) even at
-    # concurrency=1, an upstream provider issue unrelated to tool design.
-    "gpt-oss-20b": "openai/gpt-oss-20b",
+    # NOTE: gemma-4-26b and gpt-oss-20b were removed as benchmark options.
+    # gpt-oss-20b was verified (via a trivial one-tool, non-graphlens probe) to
+    # fail at SYNTHESISING an answer from tool hits on impact/enumeration tasks
+    # — "Exceeded maximum output retries", Harmony channel markers leaking into
+    # tool names — so it produced weak-model noise rather than a clean arm
+    # signal. See memory: weak-model-failure-cause.
     # Free-tier variants: run at $0 but priced at their PAID twin's live rate
     # (see fetch_pricing) so the cost comparison stays honest. NOTE: OpenRouter
     # rate-limits :free models hard — expect slow sweeps / daily caps.
@@ -67,11 +69,9 @@ class Price:
 # exact per-request cost from usage accounting is what we report as headline.
 FALLBACK_PRICING: dict[str, Price] = {
     "deepseek/deepseek-v4-flash": Price(prompt=0.09, completion=0.18),
-    "google/gemma-4-26b-a4b-it": Price(prompt=0.06, completion=0.33),
     "qwen/qwen3.5-flash-02-23": Price(prompt=0.065, completion=0.26),
     "z-ai/glm-4.7-flash": Price(prompt=0.06, completion=0.40),
     "nvidia/nemotron-3-super-120b-a12b": Price(prompt=0.085, completion=0.40),
-    "openai/gpt-oss-20b": Price(prompt=0.029, completion=0.14),
     # :free models keyed by their :free id but priced at the PAID twin's rate
     # (fetched from OpenRouter 2026-07-01). Backstop only; fetch_pricing
     # refreshes these from the live paid-twin price.

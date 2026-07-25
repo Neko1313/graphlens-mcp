@@ -9,7 +9,7 @@ It is the spiritual successor to `agent-context-bench`, with four changes:
 | | agent-context-bench | this benchmark |
 |---|---|---|
 | Engine | Claude Code CLI (`claude -p`) | **pydantic-ai** agent |
-| Models | Claude haiku/sonnet/opus | **OpenRouter** flash tier: deepseek-v4-flash, gemma-4-26b, qwen3.5-flash, glm-4.7-flash |
+| Models | Claude haiku/sonnet/opus | **OpenRouter** flash tier, headline `deepseek-v4-flash` (arm held against one model) |
 | Arms | filesystem, graphlens, serena, codegraph | **graphlens**, **semble**, codegraph, **+ `none` control** |
 | Targets | apache/superset (Py+TS) | **10 repos** across Go / Rust / Python / TS + superset (polyglot) |
 
@@ -22,8 +22,13 @@ Held against one agent, system prompt, and task set:
   **control arm with no tools** that answers from model memory (see Methodology).
   A `filesystem` (read + name search) baseline was dropped: it never competed on
   accuracy with any real arm, so its presence added cost without signal.
-- **model** — `deepseek-v3` (strong cheap MoE), `gemini-flash` (fast hosted),
-  `qwen3-8b` (small — the tool-calling stress test).
+- **model** — held constant across arms so the comparison is arm-vs-arm. The
+  headline model is `deepseek-v4-flash` (strong, cheap MoE); `bench/models.py`
+  keeps other flash-tier options (`qwen3.5-flash`, `glm-4.7-flash`, nemotron)
+  for a wider sweep. Two weak models (`gemma-4-26b`, `gpt-oss-20b`) were
+  dropped: gpt-oss-20b was verified to fail at *synthesising* answers from tool
+  results — a model limitation, not a tool-surface one — so it produced
+  weak-model noise rather than a clean arm signal.
 
 The matrix is **projects × arms × models × tasks × seeds**.
 
@@ -112,7 +117,10 @@ echo "OPENROUTER_API_KEY=sk-or-..." > .env
 ```
 
 Arm binaries expected on PATH: `codegraph`, `uvx` (for `semble`). `graphlens`
-runs from this repo's working copy via `uv run --project .. graphlens-mcp serve`.
+runs from this repo's working copy via `uv run --project .. --no-sync
+graphlens-mcp` (stdio by default — there are no subcommands). Each target gets
+its own store via a per-project `XDG_DATA_HOME`, and indexing is driven through
+the `index` MCP tool by `scripts/gl_index.py`.
 
 > **Toolchains matter for fairness.** graphlens/codegraph resolve Go via `gopls`
 > and Rust via `rust-analyzer`. Without them those languages index in *degraded*
@@ -125,14 +133,14 @@ runs from this repo's working copy via `uv run --project .. graphlens-mcp serve`
 uv run scripts/smoke_one.py --probe --project gin
 
 # One cell end-to-end (needs OPENROUTER_API_KEY):
-uv run scripts/smoke_one.py --project gin --arm graphlens --model qwen3-8b
+uv run scripts/smoke_one.py --project gin --arm graphlens --model deepseek-v4-flash
 
 # Clone + index only:
 uv run main.py --setup-only
 
 # Full matrix (resumable — re-running skips completed (task_id, seed) rows):
 uv run main.py
-uv run main.py --projects gin hono --arms graphlens codegraph --models qwen3-8b
+uv run main.py --projects gin hono --arms graphlens codegraph --models deepseek-v4-flash
 uv run main.py --only impact_set overrides_count --seeds 1
 
 # Detached overnight with auto-resume across rate limits:
@@ -148,7 +156,7 @@ uv run scripts/report.py
 
 ```jsonc
 {
-  "project": "gin", "arm": "graphlens", "model": "qwen3-8b", "seed": 0,
+  "project": "gin", "arm": "graphlens", "model": "deepseek-v4-flash", "seed": 0,
   "task_id": "gin_def_engine", "kind": "where_defined", "regime": "SIMPLE",
   "answer": "gin.go", "accuracy": 1.0,
   "input_tokens": 1234, "output_tokens": 12, "total_tokens": 1246,

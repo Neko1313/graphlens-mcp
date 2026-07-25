@@ -2,14 +2,10 @@
   "engine": "pydantic-ai + OpenRouter",
   "models": {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
-    "gemma-4-26b": "google/gemma-4-26b-a4b-it",
-    "gpt-oss-20b": "openai/gpt-oss-20b"
+    "glm-4.7-flash": "z-ai/glm-4.7-flash"
   },
   "arms": [
-    "graphlens",
-    "codegraph",
-    "semble",
-    "none"
+    "graphlens"
   ],
   "projects": {
     "gin": {

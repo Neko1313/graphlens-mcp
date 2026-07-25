@@ -54,14 +54,35 @@ def arm_available(arm: Arm, project: Project) -> tuple[bool, str]:
     return True, ""
 
 
+def _index_stats(stdout: str) -> dict | None:
+    """Return the JSON summary an index step printed on its last line."""
+    for line in reversed(stdout.strip().splitlines()):
+        line = line.strip()  # noqa: PLW2901
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
 def build_index(arm: Arm, project: Project) -> dict | None:
     """Run the arm's pre-index step (if any) and time it. Returns an index_costs row."""
-    cmd = arm.index(project)
-    if not cmd:
+    spec = arm.index(project)
+    if spec is None:
         return None
     print(f"  index {arm.name} / {project.key} ...", flush=True)
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        [spec.command, *spec.args],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=spec.cwd,
+        # An arm that scopes its store per project (graphlens, via XDG_DATA_HOME)
+        # passes a complete environment; None means "inherit ours".
+        env=spec.env or None,
+    )
     wall = time.perf_counter() - t0
     row = {
         "project": project.key,
@@ -69,6 +90,12 @@ def build_index(arm: Arm, project: Project) -> dict | None:
         "wall_s": round(wall, 3),
         "ok": proc.returncode == 0,
     }
+    stats = _index_stats(proc.stdout)
+    if stats:
+        # Node/edge counts and per-language resolver status: the cheapest way to
+        # catch an index that silently came out *degraded* (missing gopls) before
+        # a whole sweep is spent measuring a half-built graph.
+        row["stats"] = stats
     if proc.returncode != 0:
         row["stderr"] = proc.stderr[-500:]
         print(

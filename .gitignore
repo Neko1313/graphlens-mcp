@@ -228,3 +228,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# benchmark per-target graphlens stores (rebuildable)
+benchmarks/.stores/
